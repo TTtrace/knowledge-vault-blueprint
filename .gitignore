@@ -1,0 +1,17 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.bak
+~$*
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+secrets/
