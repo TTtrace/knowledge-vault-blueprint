@@ -33,15 +33,19 @@
 
 目标：手机输入永不因抓取失败而丢失。
 
-- 定义 OpenClaw 捕获命令。
+- 建立仓库级 `skills/` 和 `tests/skills/` 结构。
+- 创建首个 `vault-capture` skill，定义描述、显式命令、依赖和失败边界。
+- 在家庭主机通过 `skills.load.extraDirs` 加载稳定仓库标签。
+- 使用 `agents.list[].skills` 为 Vault agent 配置完整 allowlist。
 - 实现 URL 规范化和 `canonical_url` 去重。
 - 立即创建 Source 占位文件。
 - 建立后台抓取队列、重试和失败记录。
 - 普通网页转 Markdown。
 - 音视频生成带时间戳 transcript。
 - 每次自动化变更生成可读 Git 提交。
+- 在临时 Vault 完成 `skills list/info/check`、冒烟测试、升级和回滚演练。
 
-退出条件：失败任务能在 `maintenance.base` 中被发现和重试。
+退出条件：失败任务能在 `maintenance.base` 中被发现和重试；Vault agent 只加载预期 skill，且上一稳定标签可以恢复。
 
 ## 阶段 3：阅读工作台
 
@@ -86,4 +90,3 @@
 3. 提供可回滚的迁移说明。
 4. 先在小样本分支验证。
 5. 不静默覆盖 Source 正文或 Yanki `noteId`。
-

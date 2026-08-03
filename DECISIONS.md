@@ -18,6 +18,7 @@
 | D-010 | 卡片候选与 Yanki 监控区分离 | accepted |
 | D-011 | PDF 和大型媒体默认不进入普通 Git | accepted |
 | D-012 | 英文属性名、中文正文 | accepted |
+| D-013 | 知识库 OpenClaw skill 与蓝图同仓并由 Git 版本化 | accepted |
 
 ## D-001：单 Vault
 
@@ -114,3 +115,15 @@
 
 **理由**：便于脚本、Bases、跨平台工具和未来迁移，同时不牺牲写作体验。
 
+## D-013：OpenClaw skill 与蓝图同仓
+
+**决定**：知识库相关 OpenClaw skill 保存在本仓库的 `skills/`，与规范和测试共同版本化；正式 Vault 继续保持独立。家庭主机检出仓库的稳定标签，通过 `skills.load.extraDirs` 直接加载，并使用 `agents.list[].skills` 限定每个 agent 可见的 skill。
+
+**理由**：
+
+- schema、架构决策和运行逻辑可以在同一提交与标签中演进，减少版本漂移。
+- 多个相关 skill 共享一个仓库，不需要为每个 skill 建立独立仓库。
+- `extraDirs` 直接读取 Git 工作区，避免本地安装副本与权威源码不一致。
+- agent allowlist 可以限制提示上下文和命令发现范围，适合未来增加多个 agent。
+
+**边界**：本仓库不保存正式 Vault 数据、机器绝对路径或凭据。Allowlist 不是安全边界；文件、命令和密钥仍需通过 sandbox、操作系统权限和独立配置约束。第三方 skill 继续由 OpenClaw/ClawHub 的安装机制管理。

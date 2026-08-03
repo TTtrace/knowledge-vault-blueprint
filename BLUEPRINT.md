@@ -250,7 +250,18 @@ Obsidian Markdown → Yanki → Anki Desktop → AnkiWeb / 手机
 - 大型 PDF、音视频默认不进入普通 Git。
 - Git 是版本历史，不是完整备份；至少保留一份异机或加密远程备份。
 
-## 11. 成功标准
+## 11. OpenClaw Skill 交付
+
+- 知识库相关 skill 与本蓝图同仓，统一放在仓库根目录的 `skills/`。
+- 正式 Vault 保持独立；skill 只包含工作流、脚本、引用资料和必要资源，不包含真实笔记或凭据。
+- 家庭主机检出稳定的仓库标签，并通过 `skills.load.extraDirs` 直接加载本仓库 skill。
+- 每个 agent 使用 `agents.list[].skills` 明确列出最终可见的 skill；该列表不替代系统级文件和命令权限。
+- 自研 skill 不通过本地安装复制，避免高优先级旧副本遮盖 Git 中的权威版本。
+- 蓝图、schema、skill 和测试使用同一仓库标签发布；升级前在临时 Vault 验证，异常时回退上一稳定标签。
+
+完整规则见 [OpenClaw Skill 开发、加载与发布规范](specifications/openclaw-skill-workflow.md)。
+
+## 12. 成功标准
 
 首版运行一个月后，应能回答：
 
