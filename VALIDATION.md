@@ -1,6 +1,6 @@
 # 交付验证记录
 
-验证日期：2026-08-03
+验证日期：2026-08-04
 
 ## 结构
 
@@ -9,6 +9,7 @@
 - 演进路线：完成。
 - 专项规范：8 份。
 - OpenClaw skill 的仓库边界、加载、allowlist、发布与回滚规范：完成。
+- 首个 `vault-capture` skill、确定性脚本与运行契约：完成。
 - 完整示例：9 份。
 - Obsidian Templates：12 份。
 - Obsidian Bases：6 份。
@@ -24,6 +25,9 @@
 - [x] 抓取状态和阅读状态使用不同字段。
 - [x] Annotation 与 Analysis 模板均保留来源链接、标题和外部定位字段。
 - [x] Yanki 候选目录不在正式监控目录之内。
+- [x] `vault-capture` 的 URL 规范化、原子落盘、批注聚合、重复输入、状态转换与 Git 路径隔离测试通过。
+- [x] `vault-capture` 的测试全部使用一次性临时 Git Vault，不写入正式 Vault。
+- [x] 独立前向测试验证 Source/Annotation 提交、队列忽略及中文输入逐字保留；Windows PowerShell 5 使用 UTF-8 `--json-file` 降级接口。
 
 ## 人工检查
 
@@ -42,4 +46,5 @@
 - Yanki/AnkiConnect 首次同步及 `noteId` 写回。
 - Linux 上 `obsidian://` 链接注册。
 - Zotero 批注导出格式。
-- OpenClaw 捕获命令和后台队列实现。
+- 家庭主机加载 `vault-capture` 后的 `skills list/info/check`、子任务抓取和失败重试。
+- `web_fetch` 失败后通过个人 Chrome extension profile 只读提取登录态页面。

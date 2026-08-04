@@ -85,7 +85,10 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 
     entries: {
       "vault-capture": {
-        enabled: true
+        enabled: true,
+        env: {
+          VAULT_ROOT: "<runtime-secret-or-host-config>"
+        }
       }
     }
   }
@@ -102,6 +105,17 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 | `skills.entries.<name>.env/apiKey/config` | 提供运行期配置；敏感值不得提交到本仓库 |
 
 非空的 `agents.list[].skills` 是该 agent 的最终列表，不与默认列表自动合并。Allowlist 只控制 skill 可见性，不替代 sandbox、操作系统用户隔离、命令权限和文件权限。
+
+`vault-capture` 还要求目标 agent 能使用 `exec`、`web_fetch`、`sessions_spawn` 和 `browser`，且 sandbox 对 `VAULT_ROOT` 具有写权限。`VAULT_ROOT` 的真实绝对路径只能保存在主机配置或 SecretRef 中，不得写入本仓库。
+
+`skills.entries.vault-capture.env` 只注入宿主 agent run。若该 agent 开启 Docker sandbox，`exec` 不继承宿主环境，必须同时：
+
+- 用 `agents.list[].sandbox.docker.binds` 将主机 Vault 以 `:rw` 挂载到容器内的专用路径，例如 `/vault`。
+- 在同一 agent 的 `sandbox.docker.env` 中设置 `VAULT_ROOT: "/vault"`；skill entry 中的宿主值仍用于 eligibility 检查。
+- Vault 位于 agent workspace 之外时，显式评估并设置 `dangerouslyAllowExternalBindSources: true`，且只挂载该 Vault，不挂载整个 home。
+- 修改 sandbox 配置后执行 `openclaw sandbox recreate --agent <vault-agent-id>`，再做临时 Vault 冒烟测试。
+
+登录态网页只允许通过显式配置的 Chrome extension `chrome` profile 读取。该 profile 可访问用户登录态，必须限制为打开、导航、快照和正文提取；不得由捕获工作流输入凭据、提交表单或执行账户写操作。sandboxed session 还必须显式设置 `sandbox.browser.allowHostControl: true` 并在 sandbox tool policy 中允许 browser；浏览器插件、profile 与权限均应在临时 Vault 冒烟测试中验证。
 
 ## 5. 优先级与副本管理
 
@@ -169,4 +183,3 @@ openclaw skills check --agent <vault-agent-id>
 
 - [OpenClaw Skills](https://docs.openclaw.ai/tools/skills)
 - [OpenClaw Skills CLI](https://docs.openclaw.ai/cli/skills)
-

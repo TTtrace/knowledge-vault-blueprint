@@ -19,6 +19,7 @@
 | D-011 | PDF 和大型媒体默认不进入普通 Git | accepted |
 | D-012 | 英文属性名、中文正文 | accepted |
 | D-013 | 知识库 OpenClaw skill 与蓝图同仓并由 Git 版本化 | accepted |
+| D-014 | 每个 Source 使用一个持续累积的捕获 Annotation 文件 | accepted |
 
 ## D-001：单 Vault
 
@@ -127,3 +128,15 @@
 - agent allowlist 可以限制提示上下文和命令发现范围，适合未来增加多个 agent。
 
 **边界**：本仓库不保存正式 Vault 数据、机器绝对路径或凭据。Allowlist 不是安全边界；文件、命令和密钥仍需通过 sandbox、操作系统权限和独立配置约束。第三方 skill 继续由 OpenClaw/ClawHub 的安装机制管理。
+
+## D-014：每个 Source 一个捕获 Annotation 文件
+
+**决定**：由捕获工作流产生的划线和评论按 Source 聚合。每个 Source 最多维护一个持续累积的 Annotation 文件；新引文追加引用单元，相同引文的新评论追加到原单元。
+
+**理由**：
+
+- 移动端可能多次转发同一材料，将批注聚合到一个位置更便于连续阅读。
+- 稳定的 Source → Annotation 一对一关系简化去重、反向链接和自动化更新。
+- 每条引用单元仍保存独立时间和定位，不牺牲引用粒度。
+
+**边界**：该决定只约束自动捕获生成的 Annotation；人工细读仍可按需要创建额外 Annotation。聚合文件的 `created` 永不更新，新增内容的业务时间写在正文引用单元中，整体修改历史由 Git 和 `file.mtime` 提供。

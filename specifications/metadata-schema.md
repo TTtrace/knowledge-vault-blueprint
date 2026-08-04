@@ -116,7 +116,7 @@ tags: []
 | `source_title` | text | 是 | 即使内部链接失效也可识别 |
 | `source_url` | text | 视情况 | 网页原始链接 |
 | `zotero_uri` | text | 文献时建议 | Zotero 条目或 PDF 链接 |
-| `locator` | text | 否 | 页码、章节、时间戳或段落 |
+| `locator` | text | 否 | 单一定位时使用的页码、章节、时间戳或段落 |
 
 Annotation 可增加：
 
@@ -124,6 +124,8 @@ Annotation 可增加：
 |---|---|---|
 | `annotation_kind` | text | `highlights`, `comments`, `mixed` |
 | `engagement` | text | 通常为 `highlighted` 或 `annotated` |
+
+捕获工作流按 Source 聚合 Annotation 时，一个文件可包含多个引用单元。此时省略顶层 `locator`，在每个引用单元正文中分别保存捕获时间与 locator；`annotation_kind` 和 `engagement` 表达整个文件的聚合状态。旧的单引文 Annotation 继续使用顶层 `locator`，无需迁移或提升 `schema_version`。
 
 Analysis 可增加：
 

@@ -3,7 +3,7 @@
 > 蓝图版本：0.2.0
 > 元信息规范版本：1
 > 制定日期：2026-07-25
-> 更新日期：2026-08-03
+> 更新日期：2026-08-04
 
 这是一套面向长期演进的本地个人知识库蓝图。Markdown 是内容的权威载体，Obsidian 是主要编辑界面，Git 管理版本；OpenClaw 负责移动端输入，Zotero 管理学术文献与 PDF，Yanki 将正式卡片单向同步到 Anki。
 
@@ -23,6 +23,7 @@
 - [ROADMAP.md](ROADMAP.md)：从最小可用版演进到自动化版的路线。
 - [specifications](specifications/)：字段、命名、抓取、阅读、PDF、Anki 和 Git 规范。
 - [OpenClaw Skill 工作流](specifications/openclaw-skill-workflow.md)：自研 skill 的结构、加载、allowlist、发布和回滚规范。
+- [vault-capture](skills/vault-capture/SKILL.md)：可靠落盘、批注聚合、网页后台抓取编排与失败重试。
 - [examples](examples/)：九类可参考的完整笔记示例。
 - [vault-starter](vault-starter/)：可直接复制并由 Obsidian 打开的 Starter Vault。
 
