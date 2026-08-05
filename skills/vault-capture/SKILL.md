@@ -17,7 +17,7 @@ metadata:
 
 # Vault 捕获
 
-调用脚本前，先阅读 [references/runtime-contract.md](references/runtime-contract.md)。路径、重复检测、提交状态和后台任务资格均以脚本 JSON 为准。面向用户使用中文说明，但不要翻译命令、字段名、状态值或工具名。
+调用脚本前，先阅读 [references/runtime-contract.md](references/runtime-contract.md)。路径、重复检测、暂存状态和后台任务资格均以脚本 JSON 为准。面向用户使用中文说明，但不要翻译命令、字段名、状态值或工具名。
 
 ## 初始落盘
 
@@ -37,9 +37,9 @@ python3 {baseDir}/scripts/vault_capture.py stage <<'VAULT_CAPTURE_JSON'
 VAULT_CAPTURE_JSON
 ```
 
-5. 若 `committed` 为 `false`，向用户报告已保存的相对路径和错误；不得抓取网页或启动子任务。
-6. 若 `job_created` 为 `false`，返回已有或新建记录后停止。非网页请求应保留为 `ingest_status: manual`；个人想法直接提交。
-7. 若 `job_created` 为 `true`，启动隔离子任务。只提供任务 ID、`{baseDir}` 和下方流程；主会话立即返回 Source ID、临时相对路径和捕获提交结果。不要把临时路径称为最终文件名。
+5. 若 `staged` 为 `false`，向用户报告已保存的相对路径和错误；不得抓取网页或启动子任务。
+6. 若 `job_created` 为 `false`，返回已有或新建记录后停止。非网页请求应保留为 `ingest_status: manual`；个人想法只落盘并暂存。
+7. 若 `job_created` 为 `true`，启动隔离子任务。只提供任务 ID、`{baseDir}` 和下方流程；主会话立即返回 Source ID、临时相对路径和 Git 暂存结果。不要把临时路径称为最终文件名。
 
 ## 完成网页抓取
 
@@ -77,7 +77,7 @@ VAULT_CAPTURE_JSON
 - 每个 Source 只维护一个由捕获流程管理的 Annotation 汇总文件，去重和聚合交给脚本处理。
 - 未知正式标题时只使用 ID 临时文件；不得生成“待抓取”“待处理”或域名伪标题。
 - 摘要不得进入 Source 原文区域；原文结构、正文附件或关键元数据不完整时不得标记为 `ready`。
-- Transcript、Document 和 OCR 目前只可靠落盘为 `manual`；不要自行实现转写、解析或 OCR。未来处理器必须复用相同的临时命名、原文保真、附件完整性、原子提交和失败回滚契约。
+- Transcript、Document 和 OCR 目前只可靠落盘为 `manual`；不要自行实现转写、解析或 OCR。未来处理器必须复用相同的临时命名、原文保真、附件完整性、原子落盘、Git 暂存和失败回滚契约。
 - 不得编辑 Source 受控标记之外的正文。
-- 不得自行对捕获文件运行 Git 命令；由脚本只提交本次涉及的路径。
+- 不得自行提交或推送捕获文件；脚本只对本次涉及的路径执行 `git add`，由用户择机合并为易管理的提交。
 - 聊天回复中不得暴露 `VAULT_ROOT`、Cookie、凭据、工具原始错误或主机绝对路径。

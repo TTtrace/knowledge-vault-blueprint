@@ -489,9 +489,6 @@ def ensure_repo(vault: Path) -> None:
     result = run_git(vault, ["rev-parse", "--show-toplevel"], check=False)
     if result.returncode != 0 or Path(result.stdout.strip()).resolve() != vault.resolve():
         raise CaptureError("VAULT_ROOT must be the root of a Git repository", EXIT_INPUT)
-    identity = run_git(vault, ["var", "GIT_AUTHOR_IDENT"], check=False)
-    if identity.returncode != 0:
-        raise CaptureError("Git author identity is not configured", EXIT_INPUT)
     required = ["sources/web", "sources/transcripts", "sources/documents", "notes/annotations", "notes/ideas"]
     if any(not vault_path(vault, item).is_dir() for item in required):
         raise CaptureError("Vault is missing required capture directories", EXIT_INPUT)
@@ -500,10 +497,14 @@ def ensure_repo(vault: Path) -> None:
         raise CaptureError(".queue/vault-capture must be ignored by Git", EXIT_INPUT)
 
 
-def path_dirty(vault: Path, path: Path) -> bool:
+def path_has_unstaged_changes(vault: Path, path: Path) -> bool:
     rel = relative(vault, path)
     result = run_git(vault, ["status", "--porcelain", "--untracked-files=all", "--", rel])
-    return bool(result.stdout.strip())
+    for line in result.stdout.splitlines():
+        status = line[:2]
+        if status == "??" or (len(status) == 2 and status[1] != " "):
+            return True
+    return False
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -550,13 +551,12 @@ def capture_lock(vault: Path) -> Iterator[None]:
         handle.close()
 
 
-def commit_paths(vault: Path, paths: list[Path], message: str) -> str:
+def stage_paths(vault: Path, paths: list[Path]) -> list[str]:
     rels = [relative(vault, path) for path in paths]
-    run_git(vault, ["add", "--", *rels])
-    result = run_git(vault, ["commit", "--only", "-m", message, "--", *rels], check=False)
+    result = run_git(vault, ["add", "--", *rels], check=False)
     if result.returncode != 0:
-        raise CaptureError("Git commit failed; captured files remain on disk", EXIT_STORAGE, paths=rels)
-    return run_git(vault, ["rev-parse", "HEAD"]).stdout.strip()
+        raise CaptureError("Git add failed; captured files remain on disk", EXIT_STORAGE, paths=rels)
+    return rels
 
 
 def source_files(vault: Path) -> Iterator[Path]:
@@ -945,9 +945,9 @@ def stage_idea(vault: Path, data: dict[str, Any]) -> dict[str, Any]:
     ]
     atomic_write(path, yaml_document(fields) + f"\n\n# {title}\n\n{data['text']}\n")
     try:
-        commit = commit_paths(vault, [path], f"capture(idea): add {idea_id}")
+        staged_paths = stage_paths(vault, [path])
     except CaptureError as exc:
-        exc.details.update({"id": idea_id, "source_path": relative(vault, path), "committed": False})
+        exc.details.update({"id": idea_id, "source_path": relative(vault, path), "staged": False})
         raise
     return {
         "ok": True,
@@ -955,8 +955,8 @@ def stage_idea(vault: Path, data: dict[str, Any]) -> dict[str, Any]:
         "id": idea_id,
         "source_path": relative(vault, path),
         "annotation_path": None,
-        "committed": True,
-        "commit": commit,
+        "staged": True,
+        "staged_paths": staged_paths,
         "job_created": False,
         "ingest_status": "ready",
         "paths_final": True,
@@ -1034,10 +1034,10 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
             if annotation_added:
                 source_text = set_fields(source_text, {"engagement": engagement})
         source_changed = is_new or annotation_added > 0
-        if source_changed and not is_new and path_dirty(vault, source):
-            raise CaptureError("Source has uncommitted changes", EXIT_CONFLICT, id=source_id)
-        if annotation_added and rollup_path and rollup_path.exists() and path_dirty(vault, rollup_path):
-            raise CaptureError("Annotation has uncommitted changes", EXIT_CONFLICT, id=source_id)
+        if source_changed and not is_new and path_has_unstaged_changes(vault, source):
+            raise CaptureError("Source has unstaged changes", EXIT_CONFLICT, id=source_id)
+        if annotation_added and rollup_path and rollup_path.exists() and path_has_unstaged_changes(vault, rollup_path):
+            raise CaptureError("Annotation has unstaged changes", EXIT_CONFLICT, id=source_id)
         if source_changed:
             atomic_write(source, source_text)
             changed_paths.append(source)
@@ -1065,19 +1065,14 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
                 "id": source_id,
                 "source_path": relative(vault, source),
                 "annotation_path": relative(vault, rollup_path) if rollup_path else None,
-                "committed": True,
-                "commit": None,
+                "staged": True,
+                "staged_paths": [],
                 "job_created": False,
                 "ingest_status": status,
                 "paths_final": status != "pending" and bool(title),
             }
-        message = (
-            f"capture(source+annotations): add {source_id} with {annotation_added} entries"
-            if annotation_added
-            else f"capture(source): add queued source {source_id}"
-        )
         try:
-            commit = commit_paths(vault, changed_paths, message)
+            staged_paths = stage_paths(vault, changed_paths)
         except CaptureError:
             if job:
                 job["state"] = "blocked_git"
@@ -1089,8 +1084,8 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
             "id": source_id,
             "source_path": relative(vault, source),
             "annotation_path": relative(vault, rollup_path) if rollup_path else None,
-            "committed": True,
-            "commit": commit,
+            "staged": True,
+            "staged_paths": staged_paths,
             "job_created": job_created,
             "ingest_status": status,
             "annotation_entries_added": annotation_added,
@@ -1132,8 +1127,8 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
                 "result": "duplicate",
                 "id": source_id,
                 "source_path": relative(vault, source),
-                "committed": True,
-                "commit": None,
+                "staged": True,
+                "staged_paths": [],
                 "ingest_status": "ready",
                 "content_hash": get_field(source_text, "content_hash"),
                 "annotation_path": job.get("annotation_path"),
@@ -1144,10 +1139,10 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
         if len(rollups) > 1:
             raise CaptureError("More than one capture-managed Annotation rollup exists", EXIT_CONFLICT)
         targets = [source, *rollups]
-        if any(path_dirty(vault, path) for path in targets):
+        if any(path_has_unstaged_changes(vault, path) for path in targets):
             job["state"] = "conflict"
             write_job(vault, job)
-            raise CaptureError("Capture target has uncommitted changes", EXIT_CONFLICT, id=source_id)
+            raise CaptureError("Capture target has unstaged changes", EXIT_CONFLICT, id=source_id)
         if canonical_final:
             collision = find_source_by_url(vault, canonical_final)
             if collision and collision.resolve() != source.resolve():
@@ -1256,7 +1251,7 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
             job["asset_paths"] = [relative(vault, path) for path in asset_paths]
             write_job(vault, job)
             try:
-                commit = commit_paths(vault, changed, f"ingest(source): fetch {source_id}")
+                staged_paths = stage_paths(vault, changed)
             except CaptureError:
                 job["state"] = "blocked_git"
                 write_job(vault, job)
@@ -1275,8 +1270,8 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
             "source_path": relative(vault, final_source),
             "annotation_path": job.get("annotation_path"),
             "asset_paths": job.get("asset_paths", []),
-            "committed": True,
-            "commit": commit,
+            "staged": True,
+            "staged_paths": staged_paths,
             "ingest_status": "ready",
             "content_hash": updates["content_hash"],
             "paths_final": True,
@@ -1302,10 +1297,10 @@ def cmd_fail(vault: Path, source_id: str, input_file: str | None = None) -> dict
         source = job_source(vault, job)
         if job.get("state") == "ready":
             raise CaptureError("A ready job cannot be marked failed", EXIT_CONFLICT, id=source_id)
-        if path_dirty(vault, source):
+        if path_has_unstaged_changes(vault, source):
             job["state"] = "conflict"
             write_job(vault, job)
-            raise CaptureError("Source has uncommitted changes", EXIT_CONFLICT, id=source_id)
+            raise CaptureError("Source has unstaged changes", EXIT_CONFLICT, id=source_id)
         text = source.read_text(encoding="utf-8")
         text = set_fields(
             text,
@@ -1313,7 +1308,7 @@ def cmd_fail(vault: Path, source_id: str, input_file: str | None = None) -> dict
         )
         atomic_write(source, text)
         try:
-            commit = commit_paths(vault, [source], f"ingest(source): mark {source_id} {status}")
+            staged_paths = stage_paths(vault, [source])
         except CaptureError:
             job["state"] = "blocked_git"
             write_job(vault, job)
@@ -1327,8 +1322,8 @@ def cmd_fail(vault: Path, source_id: str, input_file: str | None = None) -> dict
             "ok": True,
             "id": source_id,
             "source_path": relative(vault, source),
-            "committed": True,
-            "commit": commit,
+            "staged": True,
+            "staged_paths": staged_paths,
             "ingest_status": status,
             "error": error,
             "paths_final": False,
@@ -1450,11 +1445,11 @@ def main() -> int:
         return 0
     except CaptureError as exc:
         payload = {"ok": False, "error": str(exc), **exc.details}
-        payload.setdefault("committed", False)
+        payload.setdefault("staged", False)
         emit(payload)
         return exc.code
     except OSError:
-        emit({"ok": False, "error": "Filesystem operation failed", "committed": False})
+        emit({"ok": False, "error": "Filesystem operation failed", "staged": False})
         return EXIT_STORAGE
 
 

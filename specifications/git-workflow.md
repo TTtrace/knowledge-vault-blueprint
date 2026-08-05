@@ -19,22 +19,24 @@ Git 不自动等于完整备份。远程仓库被误删、凭据泄露或仓库�
 - 大规模 schema 迁移时才创建临时分支。
 - 不为每条笔记建立分支。
 
-## 3. 提交粒度
+## 3. 暂存与提交粒度
 
-一次逻辑动作一个提交：
+自动捕获只执行 `git add`，不执行 `git commit` 或 `git push`。Source、Annotation、正文和附件先在暂存区累积，由用户按主题、时段或维护批次统一提交，避免每次捕获都产生 commit。
+
+人工提交时可使用：
 
 ```text
-capture(source): add queued article <id>
-ingest(source): fetch article <id>
-note(annotation): annotate <source-id>
+capture: add reading queue batch
+ingest: update fetched sources
+note: add annotation and idea batch
+vault: sync 2026-08-06
 note(analysis): complete analysis <source-id>
-note(idea): extract idea <id>
 journal: add 2026-07-25
 anki: add vocabulary card <id>
 schema: migrate metadata to v2
 ```
 
-自动化不要把大量无关格式变化和新笔记混在一个提交中。
+提交前用 `git diff --cached` 检查批次边界；需要更细粒度时再选择性取消暂存或分批提交。
 
 ## 4. 单写入者原则
 
@@ -45,7 +47,7 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 - 每条捕获创建独立文件。
 - 避免手机和桌面同时追加同一个 daily note。
 - 自动化写入采用临时文件完成后再原子替换。
-- 变更前拉取，变更后尽快提交和推送。
+- 同步或切换设备前检查暂存区，由用户决定何时提交和推送。
 - 发生冲突时保留双方内容，人工合并；不要强制覆盖。
 
 ## 5. `.obsidian`
@@ -69,7 +71,7 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 - 小型音频片段。
 - 模板、Bases 和脚本。
 
-网页捕获的正文图片统一放在 `assets/images/<source-id>/`，与完成后的 Source 和 Annotation 由同一次 `ingest(source)` 提交。图片先下载到 `.queue/` 下的临时目录；清单不完整、格式不支持或任一下载失败时，不提交附件，也不得把 Source 标记为 `ready`。
+网页捕获的正文图片统一放在 `assets/images/<source-id>/`，与完成后的 Source 和 Annotation 在同一次完成事务中暂存。图片先下载到 `.queue/` 下的临时目录；清单不完整、格式不支持或任一下载失败时，不暂存附件，也不得把 Source 标记为 `ready`。
 
 不适合：
 

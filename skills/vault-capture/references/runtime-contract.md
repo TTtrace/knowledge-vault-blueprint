@@ -56,15 +56,15 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
   "id": "permanent-id",
   "source_path": "Vault-relative path",
   "annotation_path": "Vault-relative path or null",
-  "committed": true,
-  "commit": "Git commit hash or null",
+  "staged": true,
+  "staged_paths": ["Vault-relative path"],
   "job_created": true,
   "ingest_status": "pending | ready | failed | manual",
   "paths_final": false
 }
 ```
 
-只有 `committed: true` 与 `job_created: true` 同时成立时，才允许启动后台抓取。
+只有 `staged: true` 与 `job_created: true` 同时成立时，才允许启动后台抓取。`duplicate` 返回空的 `staged_paths`。脚本不创建 Git commit，也不要求配置 Git author identity。
 
 ## `finalize` 与 `fail` 输入
 
@@ -86,7 +86,7 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 每个 token 必须安全、唯一，并在 Markdown 中恰好出现一次；Markdown 中的占位符与 `images` 必须完全一致。脚本把图片写入 `assets/images/<source-id>/`，按正文顺序命名为 `<三位序号>-<内容哈希前12位>.<扩展名>`，再把占位符改为标准相对 Markdown 链接。允许 JPEG、PNG、WebP、GIF；单图上限 20 MB，单篇合计上限 100 MB。图片 URL 必须是公开 HTTP(S) 地址；任一图片失败时不得写入正文或设置 `ready`。
 
-完成后 Source 使用 `<作者>--<正式标题>--<captured日期>--<source-id>.md`，Annotation 使用 `annotated_<作者>--<正式标题>--<captured日期>--<source-id>.md`。作者按署名、publisher、域名、`未知作者` 的顺序回退。作者和标题文件名部分分别限制为 32 与 80 字符，frontmatter 保留完整值。脚本负责计算 `content_hash`；存在摘要时设置 `verification: unverified`；只有 Source、Annotation、图片和 Git 提交全部成功后才把队列与 Source 改为 `ready`。输出返回最终 `source_path`、`annotation_path`、`asset_paths` 和 `paths_final: true`。
+完成后 Source 使用 `<作者>--<正式标题>--<captured日期>--<source-id>.md`，Annotation 使用 `annotated_<作者>--<正式标题>--<captured日期>--<source-id>.md`。作者按署名、publisher、域名、`未知作者` 的顺序回退。作者和标题文件名部分分别限制为 32 与 80 字符，frontmatter 保留完整值。脚本负责计算 `content_hash`；存在摘要时设置 `verification: unverified`；只有 Source、Annotation、图片和 Git 暂存全部成功后才把队列与 Source 改为 `ready`。输出返回最终 `source_path`、`annotation_path`、`asset_paths`、`staged_paths` 和 `paths_final: true`。
 
 `fail` 接受：
 
@@ -115,4 +115,8 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 ## 重试状态
 
-队列文件位于 `.queue/vault-capture/`，且不提交到 Git。无过滤条件的 `list-retryable` 只返回 `failed` 任务。用户明确解决阻塞并要求重试后，指定 ID 的 `list-retryable ID` 也可以返回 `manual`。`conflict`、`blocked_git` 和 `ready` 永远不会被返回。队列项缺失时，只能通过新的显式捕获或人工维护进行重建；不得猜测 Source 路径。
+队列文件位于 `.queue/vault-capture/`，且不进入 Git 暂存区。无过滤条件的 `list-retryable` 只返回 `failed` 任务。用户明确解决阻塞并要求重试后，指定 ID 的 `list-retryable ID` 也可以返回 `manual`。`conflict`、`blocked_git` 和 `ready` 永远不会被返回。队列项缺失时，只能通过新的显式捕获或人工维护进行重建；不得猜测 Source 路径。
+
+## Git 暂存与冲突边界
+
+`stage`、`finalize` 和 `fail` 只对本次实际变化的路径执行 `git add -- <paths>`，保留索引中已有的其他变更，不执行 `git commit` 或 `git push`。已暂存的捕获结果可继续累积 Annotation 或完成正文抓取；目标文件存在未暂存修改或未跟踪的既有文件时必须停止，以免覆盖人工编辑。

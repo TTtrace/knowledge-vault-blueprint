@@ -92,6 +92,7 @@ class VaultCaptureTests(unittest.TestCase):
         git(self.vault, "config", "core.quotepath", "false")
         git(self.vault, "add", ".")
         git(self.vault, "commit", "-q", "-m", "init")
+        self.initial_head = git(self.vault, "rev-parse", "HEAD").stdout.strip()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -139,6 +140,14 @@ class VaultCaptureTests(unittest.TestCase):
             vault_capture.normalize_url("https://user:secret@example.com/")
         with self.assertRaises(vault_capture.CaptureError):
             vault_capture.vault_path(self.vault, "../escape.md")
+
+    def test_staging_does_not_require_git_author_identity(self):
+        git(self.vault, "config", "user.name", "")
+        git(self.vault, "config", "user.email", "")
+        result = self.stage_web(annotations=[])
+        self.assertTrue(result["staged"])
+        self.assertNotIn("commit", result)
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
 
     def test_frontmatter_list_updates_do_not_leave_old_items(self):
         text = "---\nauthor:\n  - \"旧作者\"\npublisher: \"旧站点\"\n---\n\n# 标题\n"
@@ -199,7 +208,10 @@ class VaultCaptureTests(unittest.TestCase):
 
     def test_stage_merges_one_numbered_rollup(self):
         first = self.stage_web()
-        self.assertTrue(first["committed"])
+        self.assertTrue(first["staged"])
+        self.assertNotIn("commit", first)
+        self.assertCountEqual(first["staged_paths"], [first["source_path"], first["annotation_path"]])
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
         self.assertTrue(first["job_created"])
         self.assertFalse(first["paths_final"])
         self.assertEqual(first["annotation_entries_added"], 1)
@@ -248,7 +260,7 @@ class VaultCaptureTests(unittest.TestCase):
             ],
         )
         self.assertEqual(duplicate["result"], "duplicate")
-        self.assertIsNone(duplicate["commit"])
+        self.assertEqual(duplicate["staged_paths"], [])
 
     def test_legacy_rollup_is_normalized_when_explicitly_touched(self):
         rollup = vault_capture.render_rollup(
@@ -297,7 +309,7 @@ class VaultCaptureTests(unittest.TestCase):
         self.assertIn('"locator":"第二节"', migrated)
         self.assertIn('"captured_at":"2026-08-04T09:30:00+08:00"', migrated)
 
-    def test_finalize_updates_only_managed_content_and_commits(self):
+    def test_finalize_updates_only_managed_content_and_stages(self):
         staged = self.stage_web(annotations=[])
         provisional_source = self.vault / staged["source_path"]
         before = provisional_source.read_text(encoding="utf-8")
@@ -361,7 +373,7 @@ class VaultCaptureTests(unittest.TestCase):
             },
         )
         self.assertEqual(repeated["result"], "duplicate")
-        self.assertIsNone(repeated["commit"])
+        self.assertEqual(repeated["staged_paths"], [])
         self.assertNotIn("不会覆盖", source.read_text(encoding="utf-8"))
 
     def test_finalize_renames_rollup_and_localizes_images(self):
@@ -410,10 +422,11 @@ class VaultCaptureTests(unittest.TestCase):
         self.assertNotIn("未定位", annotation_text)
         self.assertNotRegex(annotation_text, r"(?m)^## 2026-")
         self.assertNotIn("- 2026-", annotation_text)
-        committed = git(self.vault, "show", "--pretty=", "--name-only", "HEAD").stdout.splitlines()
-        self.assertIn(finalized["source_path"], committed)
-        self.assertIn(finalized["annotation_path"], committed)
-        self.assertIn(finalized["asset_paths"][0], committed)
+        staged_paths = git(self.vault, "diff", "--cached", "--name-only").stdout.splitlines()
+        self.assertIn(finalized["source_path"], staged_paths)
+        self.assertIn(finalized["annotation_path"], staged_paths)
+        self.assertIn(finalized["asset_paths"][0], staged_paths)
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
 
     def test_image_failure_does_not_mark_source_ready(self):
         staged = self.stage_web(annotations=[])
@@ -460,7 +473,7 @@ class VaultCaptureTests(unittest.TestCase):
         explicit = self.run_cli("list-retryable", staged2["id"])
         self.assertEqual(explicit["jobs"][0]["state"], "manual")
 
-    def test_non_web_and_idea_are_reliably_committed_without_jobs(self):
+    def test_non_web_and_idea_are_reliably_staged_without_jobs(self):
         transcript = self.run_cli(
             "stage",
             payload={
@@ -543,20 +556,19 @@ class VaultCaptureTests(unittest.TestCase):
             expected=3,
         )
         self.assertFalse(result["ok"])
-        self.assertIn("uncommitted", result["error"])
+        self.assertIn("unstaged", result["error"])
         self.assertIn("人工修改", source.read_text(encoding="utf-8"))
 
-    def test_capture_commit_does_not_include_unrelated_staged_changes(self):
+    def test_capture_stages_target_and_preserves_unrelated_staged_changes(self):
         unrelated = self.vault / "notes" / "ideas" / "unrelated.md"
         unrelated.write_text("user change\n", encoding="utf-8")
         git(self.vault, "add", "notes/ideas/unrelated.md")
         staged = self.stage_web(annotations=[])
-        self.assertTrue(staged["committed"])
+        self.assertTrue(staged["staged"])
         cached = git(self.vault, "diff", "--cached", "--name-only").stdout.splitlines()
-        self.assertEqual(cached, ["notes/ideas/unrelated.md"])
-        committed = git(self.vault, "show", "--pretty=", "--name-only", "HEAD").stdout.splitlines()
-        self.assertIn(staged["source_path"], committed)
-        self.assertNotIn("notes/ideas/unrelated.md", committed)
+        self.assertCountEqual(cached, ["notes/ideas/unrelated.md", staged["source_path"]])
+        self.assertEqual(staged["staged_paths"], [staged["source_path"]])
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
 
     def test_skill_contract_and_links_exist(self):
         skill = (REPO / "skills/vault-capture/SKILL.md").read_text(encoding="utf-8")

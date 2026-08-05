@@ -44,7 +44,7 @@
 - 建立后台抓取队列、重试和失败记录。
 - 普通网页转 Markdown。
 - 音视频生成带时间戳 transcript。
-- 每次自动化变更生成可读 Git 提交。
+- 每次自动化变更只暂存相关路径，由用户按批次生成可读 Git 提交。
 - 在临时 Vault 完成 `skills list/info/check`、RC 冒烟测试、稳定版晋级和回滚演练。
 
 退出条件：失败任务能在 `maintenance.base` 中被发现和重试；Vault agent 只加载预期 skill，且上一稳定标签可以恢复。

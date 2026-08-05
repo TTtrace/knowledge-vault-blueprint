@@ -18,13 +18,13 @@ flowchart TD
     A["收到 URL / 文本"] --> B["规范化并检查重复"]
     B --> C["生成 ID 和临时文件路径"]
     C --> D["写入 Source 占位文件"]
-    D --> E["Git 提交：capture stub"]
+    D --> E["Git 暂存：capture stub"]
     E --> F["创建后台任务"]
     F --> G["抓取 / 转写 / OCR"]
     G -->|成功| H["写入正文与元信息"]
     G -->|失败| I["记录错误并等待重试"]
-    H --> J["Git 提交：ingest ready"]
-    I --> K["Git 提交：ingest failed"]
+    H --> J["Git 暂存：ingest ready"]
+    I --> K["Git 暂存：ingest failed"]
 ```
 
 占位文件必须在网络请求前写入。
@@ -109,7 +109,7 @@ flowchart TD
 - `ready` 后的 Source 正文原则上不可手工混入批注。
 - 再抓取必须通过显式 refresh。
 - refresh 前计算 `content_hash`。
-- 内容变化时生成独立 Git 提交，不覆盖无法追踪的历史。
+- 内容变化时将相关路径加入 Git 暂存区，不自动提交，也不覆盖未暂存的人工修改。
 - 页面噪声、导航、推荐列表和评论区应在转换时清理。
 - 保留标题层级、段落、引用、列表、表格、代码、强调、链接、正文图片和图注的原始顺序；不得用摘要或连续纯文本替代原文结构。
 - 正文图片下载到 `assets/images/<source-id>/`，并改写为标准相对 Markdown 链接。任一有效正文图片失败时不得标记 `ready`。
@@ -161,15 +161,9 @@ verification: unverified
 - 用户可以将无价值来源标记为 `read_status: skipped`，而不是无限重试。
 - 抓取失败不影响已落盘批注；Annotation 自带引文、评论和 `source_url`，仍可独立阅读与定位。
 
-## 10. Git 提交建议
+## 10. Git 暂存与人工提交
 
-```text
-capture(source): add queued article <id>
-capture(source+annotations): add <id> with N entries
-ingest(source): fetch article <id>
-ingest(source): mark <id> failed
-transcribe(source): add transcript <id>
-```
+捕获自动化只对本次实际变化的路径执行 `git add`，不执行 `git commit` 或 `git push`。Source 占位、Annotation 追加、正文完成和失败状态可以在暂存区持续累积，由用户按主题、时段或维护批次统一提交。
 
 ## 11. 伴随批注的捕获
 
@@ -182,15 +176,15 @@ transcribe(source): add transcript <id>
 - 聚合后的 `annotation_kind`：全部为纯引文时取 `highlights`，全部为纯评论时取 `comments`，其他组合取 `mixed`。
 - Annotation 或 Source 中只要存在评论，`engagement` 取 `annotated`；只有引文时取 `highlighted`。
 
-### 11.2 原子落盘与 Git
+### 11.2 原子落盘与 Git 暂存
 
 1. 规范化输入并完成 Source 去重。
 2. 原子写入新的 Source 占位；未知正式标题时仅使用 `<source-id>.md`。
 3. 原子创建或更新该 Source 唯一的 Annotation 文件。
-4. Source 与 Annotation 的本次变更生成一次 `capture(source+annotations)` 提交；无批注时使用 `capture(source)`。
-5. 正文抓取在后台独立执行，成功或失败状态生成第二次提交。
+4. 对 Source 与 Annotation 的本次变化路径执行一次 `git add`；无批注时只暂存 Source。
+5. 正文抓取在后台独立执行，成功或失败后再次暂存实际变化的 Source、Annotation 和附件路径。
 
-不得先提交 Source、再声称 Source 与 Annotation 属于同一次提交。若 Git 提交失败，保留已经落盘的文件并停止启动后台抓取，等待显式修复。
+自动化不得执行 `git commit` 或 `git push`。若 `git add` 失败，保留已经落盘的文件并停止启动后台抓取，等待显式修复。暂存区中已有的其他路径必须保持不变。
 
 ### 11.3 Annotation 结构
 
@@ -218,7 +212,7 @@ transcribe(source): add transcript <id>
 
 - 命中已有 Source 时不创建新 Source；只合并新增批注或其他受支持的结构化信息。
 - 若该 Source 尚无 Annotation，则首次创建；若已有，则按 §11.1 合并。
-- 重复输入没有产生任何新引文、评论或其他受支持变更时返回现有记录，不生成空提交。
+- 重复输入没有产生任何新引文、评论或其他受支持变更时返回现有记录，`staged_paths` 为空。
 - Annotation 文件使用首次创建时生成的永久 ID 和稳定文件名，后续捕获不重命名。
 
 ### 11.5 失败边界
@@ -226,7 +220,7 @@ transcribe(source): add transcript <id>
 - Source 抓取失败或永久处于 `manual` 时，Annotation 仍保持有效。
 - 后来抓取的正文与既有引文不一致时，以 Annotation 内保存的引文为准。
 - 纯评论无引文时允许落盘，但必须保留捕获时间和 Source 链接；可在之后补充定位。
-- 目标 Source 或 Annotation 存在未提交人工修改时，自动化必须停止合并并报告冲突，不得覆盖。
+- 目标 Source 或 Annotation 存在未暂存人工修改时，自动化必须停止合并并报告冲突，不得覆盖；已暂存的捕获结果允许继续累积。
 
 ## 12. 通用 Source 完成契约
 

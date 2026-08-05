@@ -21,6 +21,7 @@
 | D-013 | 知识库 OpenClaw skill 与蓝图同仓并由 Git 版本化 | accepted |
 | D-014 | 每个 Source 使用一个持续累积的捕获 Annotation 文件 | accepted |
 | D-015 | OpenClaw skill 候选版本先在 Linux 验证再晋级稳定版 | accepted |
+| D-016 | Vault 捕获自动化只暂存，不自动提交 | accepted |
 
 ## D-001：单 Vault
 
@@ -154,3 +155,11 @@
 - 发布与被验证的 commit 保持一致，避免测试通过后又因 squash、rebase 或 amend 引入未验证变化。
 
 **边界**：RC 失败后创建新 commit 和下一个 RC 标签，不移动旧标签。候选通过后不得再改写该 commit；若合并、冲突处理或历史整理改变了 commit 或最终文件树，必须重新执行 Linux 验证。staging 与 production 使用不同检出目录；需要同时运行时，使用隔离的 OpenClaw profile、配置、状态、workspace 和端口。本决定采纳前已经进入共享 `main` 的未验证提交不重写历史，但视为未发布候选；首个通过 Linux 验证的正式标签建立稳定基线。
+
+## D-016：Vault 捕获只暂存
+
+**决定**：`vault-capture` 在创建或更新 Source、Annotation、Idea、正文状态和附件后，只对本次变化的路径执行 `git add`，不自动执行 `git commit` 或 `git push`。用户按主题、时段或维护批次统一提交。
+
+**理由**：Source 捕获、Annotation 追加和后台抓取会在短时间内产生多次细碎变化；逐次提交会制造大量低价值 commit，增加历史浏览、同步与整理成本。暂存仍能明确本次写入范围，并允许提交前集中复核。
+
+**边界**：已暂存的捕获结果允许继续累积；目标文件存在未暂存修改或未跟踪的既有文件时，自动化停止并报告冲突。`git add` 失败时保留落盘内容，但不得启动后续抓取或把任务标记为 `ready`。何时提交、如何分批及是否推送由用户决定。
