@@ -20,6 +20,7 @@
 | D-012 | 英文属性名、中文正文 | accepted |
 | D-013 | 知识库 OpenClaw skill 与蓝图同仓并由 Git 版本化 | accepted |
 | D-014 | 每个 Source 使用一个持续累积的捕获 Annotation 文件 | accepted |
+| D-015 | OpenClaw skill 候选版本先在 Linux 验证再晋级稳定版 | accepted |
 
 ## D-001：单 Vault
 
@@ -140,3 +141,16 @@
 - 每条引用单元仍保存独立时间和定位，不牺牲引用粒度。
 
 **边界**：该决定只约束自动捕获生成的 Annotation；人工细读仍可按需要创建额外 Annotation。聚合文件的 `created` 永不更新，新增内容的业务时间写在正文引用单元中，整体修改历史由 Git 和 `file.mtime` 提供。
+
+## D-015：候选版本先验证再晋级
+
+**决定**：Git commit 只表示可传输、可回退的开发快照，不自动表示稳定发布。OpenClaw skill 在功能分支完成开发机检查后，以不可变的 RC 标签传到 Linux staging；只有 Linux 对该精确 commit 验证通过后，才将同一 commit 晋级到 `main` 并创建正式版本标签。
+
+**理由**：
+
+- OpenClaw 的真实运行环境在家庭 Linux 主机，开发机检查不能替代主机验证。
+- 功能分支允许安全传递尚未完全验证的代码，同时保持 `main` 和正式标签的稳定含义。
+- RC 标签和 commit hash 能准确复现失败候选，便于修复、比较和回滚。
+- 发布与被验证的 commit 保持一致，避免测试通过后又因 squash、rebase 或 amend 引入未验证变化。
+
+**边界**：RC 失败后创建新 commit 和下一个 RC 标签，不移动旧标签。候选通过后不得再改写该 commit；若合并、冲突处理或历史整理改变了 commit 或最终文件树，必须重新执行 Linux 验证。staging 与 production 使用不同检出目录；需要同时运行时，使用隔离的 OpenClaw profile、配置、状态、workspace 和端口。本决定采纳前已经进入共享 `main` 的未验证提交不重写历史，但视为未发布候选；首个通过 Linux 验证的正式标签建立稳定基线。

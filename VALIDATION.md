@@ -1,6 +1,6 @@
 # 交付验证记录
 
-验证日期：2026-08-04
+验证日期：2026-08-05
 
 ## 结构
 
@@ -9,6 +9,7 @@
 - 演进路线：完成。
 - 专项规范：8 份。
 - OpenClaw skill 的仓库边界、加载、allowlist、发布与回滚规范：完成。
+- OpenClaw skill 的 RC → Linux staging → 稳定版晋级规范：完成。
 - 首个 `vault-capture` skill、确定性脚本与运行契约：完成。
 - 完整示例：9 份。
 - Obsidian Templates：12 份。

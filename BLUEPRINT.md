@@ -254,10 +254,11 @@ Obsidian Markdown → Yanki → Anki Desktop → AnkiWeb / 手机
 
 - 知识库相关 skill 与本蓝图同仓，统一放在仓库根目录的 `skills/`。
 - 正式 Vault 保持独立；skill 只包含工作流、脚本、引用资料和必要资源，不包含真实笔记或凭据。
-- 家庭主机检出稳定的仓库标签，并通过 `skills.load.extraDirs` 直接加载本仓库 skill。
+- 功能分支和 RC 标签用于把候选代码传到 Linux staging；只有该精确 commit 验证通过后，才能晋级 `main` 和正式标签。
+- production 只检出稳定标签，并通过 `skills.load.extraDirs` 直接加载本仓库 skill；staging 使用独立检出目录和测试 Vault。
 - 每个 agent 使用 `agents.list[].skills` 明确列出最终可见的 skill；该列表不替代系统级文件和命令权限。
 - 自研 skill 不通过本地安装复制，避免高优先级旧副本遮盖 Git 中的权威版本。
-- 蓝图、schema、skill 和测试使用同一仓库标签发布；升级前在临时 Vault 验证，异常时回退上一稳定标签。
+- 蓝图、schema、skill 和测试使用同一仓库标签发布；验证后不得改写候选 commit，异常时回退上一稳定标签。
 
 完整规则见 [OpenClaw Skill 开发、加载与发布规范](specifications/openclaw-skill-workflow.md)。
 

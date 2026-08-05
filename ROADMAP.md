@@ -35,7 +35,9 @@
 
 - 建立仓库级 `skills/` 和 `tests/skills/` 结构。
 - 创建首个 `vault-capture` skill，定义描述、显式命令、依赖和失败边界。
-- 在家庭主机通过 `skills.load.extraDirs` 加载稳定仓库标签。
+- 由功能分支提交开发快照，以不可变 RC 标签传到 Linux staging 验证。
+- 候选通过后，将同一 commit 晋级 `main` 和正式标签；production 只加载正式标签。
+- staging 与 production 使用独立检出目录、Vault 和 OpenClaw profile。
 - 使用 `agents.list[].skills` 为 Vault agent 配置完整 allowlist。
 - 实现 URL 规范化和 `canonical_url` 去重。
 - 立即创建 Source 占位文件。
@@ -43,7 +45,7 @@
 - 普通网页转 Markdown。
 - 音视频生成带时间戳 transcript。
 - 每次自动化变更生成可读 Git 提交。
-- 在临时 Vault 完成 `skills list/info/check`、冒烟测试、升级和回滚演练。
+- 在临时 Vault 完成 `skills list/info/check`、RC 冒烟测试、稳定版晋级和回滚演练。
 
 退出条件：失败任务能在 `maintenance.base` 中被发现和重试；Vault agent 只加载预期 skill，且上一稳定标签可以恢复。
 

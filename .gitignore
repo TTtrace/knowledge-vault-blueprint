@@ -15,3 +15,5 @@ desktop.ini
 .env.*
 !.env.example
 secrets/
+
+*.pyc

@@ -142,12 +142,24 @@ OpenClaw 发生同名冲突时，workspace skill 的优先级高于 `extraDirs`�
 
 ## 7. 发布、部署与回滚
 
-本仓库使用语义版本标签作为蓝图与所有知识库 skill 的共同发布单元：
+本仓库使用功能分支传递开发快照，使用 RC 标签标识待 Linux 验证的候选，使用 `main` 与正式语义版本标签标识稳定发布：
 
-1. 在开发分支完成规范、实现和测试。
-2. 合并到 `main` 后创建稳定标签，例如 `v0.2.0`。
-3. 家庭主机获取新标签并检出该明确版本，不直接跟随未验证的开发分支。
-4. 运行：
+| Git 状态 | 含义 |
+|---|---|
+| `skill/<name>` 功能分支 | 开发中；允许提交和推送尚未完成 Linux 验证的快照 |
+| `vX.Y.Z-rc.N` | 已通过开发机检查、等待 Linux staging 验证的不可变候选 |
+| `main` | 只接收已通过 Linux 验证的候选 commit |
+| `vX.Y.Z` | production 可以检出的稳定版本 |
+
+采用本规范时，如果共享 `main` 已含未经过 Linux 验证的提交，不执行 force-push 或历史重写。将这些提交视为尚未发布的过渡候选，不创建正式标签；从当前提交形成新的 RC，在 Linux 验证完整候选文件树。首个验证通过的正式标签建立稳定基线，此后 `main` 才严格维持上表语义。
+
+发布顺序：
+
+1. 在功能分支同步修改规范、实现和测试；WIP commit 可以推送，但不得称为稳定版本。
+2. 在开发机完成历史整理、静态检查和基础测试，然后冻结候选 commit。
+3. 为候选创建 RC 标签，例如 `v0.2.0-rc.1`，并推送功能分支和标签。
+4. Linux staging 获取标签，以 detached HEAD 检出该精确候选，不直接测试会继续移动的开发分支。
+5. 运行：
 
 ```text
 openclaw skills list --eligible --agent <vault-agent-id>
@@ -155,8 +167,21 @@ openclaw skills info <skill-name> --agent <vault-agent-id>
 openclaw skills check --agent <vault-agent-id>
 ```
 
-5. 开启新会话，在临时 Vault 执行冒烟测试；通过后才允许写入正式 Vault。
-6. 出现问题时检出上一稳定标签，重新运行检查并开启新会话。
+6. 开启 staging 新会话，在临时 Vault 执行冒烟测试。
+7. 若失败，在功能分支创建修复 commit 和下一个 RC 标签；不得移动或覆盖旧 RC。
+8. 若通过，将同一候选 commit fast-forward 晋级到 `main`，并在该 commit 创建正式标签，例如 `v0.2.0`。
+9. production 只检出正式标签；出现问题时检出上一稳定标签，重新运行检查并开启新会话。
+
+Linux 同时承担验证和正式运行时，使用两个独立检出目录：
+
+```text
+<blueprint-staging>       # 检出 RC 标签，只连接测试 Vault
+<blueprint-production>    # 检出正式标签，只连接正式 Vault
+```
+
+同一个 OpenClaw 配置不得同时把这两个目录加入 `extraDirs`，否则会发现同名 skill。需要 staging 与 production 同时运行时，使用不同 OpenClaw named profile，并隔离配置、状态目录、agent workspace 和 Gateway 端口。尚未投入 production 时，只建立 staging 环境即可。
+
+Linux 验证通过之后，不得对候选 commit 执行 amend、rebase、squash 或其他历史改写。若 `main` 无法 fast-forward，或合并结果改变了候选 commit/文件树，必须对最终候选重新打 RC 并重新验证。
 
 `watch: true` 可以在 `SKILL.md` 变化后刷新 skill 快照，但涉及脚本、reference、allowlist 或运行配置的发布仍以新会话验证为准。
 
@@ -176,6 +201,9 @@ openclaw skills check --agent <vault-agent-id>
 - `openclaw skills list/info/check` 均显示预期来源和 eligible 状态。
 - 目标 agent 只能看到 allowlist 中的 skill；其他 agent 不会意外继承。
 - 不存在 workspace 同名副本遮盖 `extraDirs` 版本。
+- RC 标签不可变，Linux 验证记录指向明确的 commit hash。
+- `main` 与正式标签指向已验证的同一 commit；验证后没有发生历史改写。
+- staging 与 production 不在同一配置中加载两份同名 skill。
 - 临时 Vault 冒烟测试、版本升级和上一标签回滚均通过。
 - 仓库中不存在 API Key、Token、Cookie、真实主机路径或正式 Vault 数据。
 
@@ -183,3 +211,4 @@ openclaw skills check --agent <vault-agent-id>
 
 - [OpenClaw Skills](https://docs.openclaw.ai/tools/skills)
 - [OpenClaw Skills CLI](https://docs.openclaw.ai/cli/skills)
+- [OpenClaw Multiple Gateways](https://docs.openclaw.ai/gateway/multiple-gateways)
