@@ -16,7 +16,7 @@ ingest_status == ready
 2. `estimated_minutes` 升序或按可用时间过滤。
 3. `captured` 升序，防止旧项目永久沉底。
 
-每个待读来源都应尽量填写 `why_saved`。如果已经无法说明为何值得读，应考虑 `skipped`。
+如果来源长期未读且优先级已失效，应考虑标记为 `skipped`。
 
 只需要未来检索、并不承诺完整阅读的资料使用 `read_status: reference`，不会进入稍后读面板。
 
@@ -127,7 +127,7 @@ AI 陈述默认 `verification: unverified`。引用外部事实时应补充真�
 每周只处理少量关键问题：
 
 - `failed` 抓取是否值得重试？
-- 保存超过一定时间且无 `why_saved` 的来源是否放弃？
+- 保存超过一定时间且持续未读的来源是否放弃？
 - `reading` 太久的项目是否继续？
 - 已完成 Analysis 是否提炼了 Idea？
 - `seed` Idea 是否与现有观点重复？

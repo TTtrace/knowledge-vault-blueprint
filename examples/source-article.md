@@ -17,7 +17,6 @@ read_status: read
 engagement: analyzed
 priority: 1
 estimated_minutes: 12
-why_saved: 想理解稍后读列表为什么会失效
 capture_method: openclaw
 topics:
   - "[[知识管理]]"
@@ -46,4 +45,3 @@ tags: []
 稍后读列表管理的不是文章，而是一个人未来愿意投入的注意力。若保存时没有理由，未来通常也没有选择依据。
 
 <!-- source-content:end -->
-

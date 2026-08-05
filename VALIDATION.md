@@ -26,7 +26,7 @@
 - [x] 抓取状态和阅读状态使用不同字段。
 - [x] Annotation 与 Analysis 模板均保留来源链接、标题和外部定位字段。
 - [x] Yanki 候选目录不在正式监控目录之内。
-- [x] `vault-capture` 的 URL 规范化、原子落盘、批注聚合、重复输入、状态转换与 Git 路径隔离测试通过。
+- [x] `vault-capture` 的 URL 规范化、临时/最终命名、原文结构保留、图片本地化、批注聚合、重复输入、状态转换与 Git 路径隔离测试通过。
 - [x] `vault-capture` 的测试全部使用一次性临时 Git Vault，不写入正式 Vault。
 - [x] 独立前向测试验证 Source/Annotation 提交、队列忽略及中文输入逐字保留；Windows PowerShell 5 使用 UTF-8 `--json-file` 降级接口。
 

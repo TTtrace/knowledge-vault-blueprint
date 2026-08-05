@@ -7,11 +7,13 @@ import argparse
 import contextlib
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
 import string
 import subprocess
 import sys
@@ -20,6 +22,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 
 EXIT_INPUT = 2
@@ -31,6 +34,42 @@ ENTRIES_END = "<!-- vault-capture:entries:end -->"
 SOURCE_START = "<!-- source-content:start -->"
 SOURCE_END = "<!-- source-content:end -->"
 ENTRY_RE = re.compile(r"(?m)^<!-- vault-capture:entry (\{.*\}) -->$")
+STAGE_FIELDS = {
+    "kind",
+    "url",
+    "title",
+    "text",
+    "topics",
+    "priority",
+    "medium",
+    "captured_at",
+    "annotations",
+    "author",
+    "publisher",
+    "published",
+}
+FINALIZE_FIELDS = {
+    "title",
+    "author",
+    "publisher",
+    "published",
+    "summary",
+    "markdown",
+    "images",
+    "images_complete",
+    "final_url",
+    "retrieved_at",
+    "language",
+}
+IMAGE_TOKEN_RE = re.compile(r"vault-image://([a-zA-Z0-9_-]+)")
+IMAGE_TYPES = {
+    "image/jpeg": ("jpg", lambda data: data.startswith(b"\xff\xd8\xff")),
+    "image/png": ("png", lambda data: data.startswith(b"\x89PNG\r\n\x1a\n")),
+    "image/webp": ("webp", lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"),
+    "image/gif": ("gif", lambda data: data.startswith((b"GIF87a", b"GIF89a"))),
+}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_ARTICLE_IMAGE_BYTES = 100 * 1024 * 1024
 TRACKING_KEYS = {
     "fbclid",
     "gclid",
@@ -133,6 +172,162 @@ def normalize_url(raw: str) -> str:
     return urlunsplit((scheme, host_rendered, path, urlencode(query_items, doseq=True), ""))
 
 
+def reject_unknown_fields(data: dict[str, Any], allowed: set[str], command: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise CaptureError(f"Unsupported {command} fields: {', '.join(unknown)}", EXIT_INPUT)
+
+
+def validate_author(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise CaptureError("author must be a list of strings", EXIT_INPUT)
+    return [inline(item) for item in value if inline(item)]
+
+
+def validate_published(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise CaptureError("published must use YYYY-MM-DD", EXIT_INPUT)
+    try:
+        dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise CaptureError("published must be a valid date", EXIT_INPUT) from exc
+    return value
+
+
+def credit_label(author: list[str], publisher: str, url: str) -> str:
+    if author:
+        return "、".join(author)
+    if publisher:
+        return publisher
+    host = urlsplit(url).hostname if url else ""
+    return host or "未知作者"
+
+
+def final_stem(author: list[str], publisher: str, url: str, title: str, captured_at: str, source_id: str) -> str:
+    author_part = sanitize_component(credit_label(author, publisher, url), "未知作者", 32)
+    title_part = sanitize_component(title, source_id, 80)
+    captured_date = dt.datetime.fromisoformat(captured_at).date().isoformat()
+    return f"{author_part}--{title_part}--{captured_date}--{source_id}"
+
+
+def source_folder(kind: str) -> str:
+    if kind == "web":
+        return "sources/web"
+    if kind == "transcript":
+        return "sources/transcripts"
+    return "sources/documents"
+
+
+def source_path_for(
+    vault: Path,
+    kind: str,
+    source_id: str,
+    title: str,
+    author: list[str],
+    publisher: str,
+    url: str,
+    captured_at: str,
+) -> Path:
+    folder = source_folder(kind)
+    if not title:
+        return vault_path(vault, f"{folder}/{source_id}.md")
+    stem = final_stem(author, publisher, url, title, captured_at, source_id)
+    return vault_path(vault, f"{folder}/{stem}.md")
+
+
+def annotation_path_for(vault: Path, source_id: str, final_source_stem: str | None = None) -> Path:
+    stem = f"annotated_{final_source_stem}" if final_source_stem else f"annotated_{source_id}"
+    return vault_path(vault, f"notes/annotations/{stem}.md")
+
+
+def ensure_public_asset_url(url: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+        raise CaptureError("Image URL must be an absolute public HTTP(S) URL", EXIT_INPUT)
+    if os.environ.get("VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS") == "1":
+        return
+    try:
+        default_port = 443 if parts.scheme == "https" else 80
+        addresses = {item[4][0] for item in socket.getaddrinfo(parts.hostname, parts.port or default_port, type=socket.SOCK_STREAM)}
+    except OSError as exc:
+        raise CaptureError("Image host could not be resolved", EXIT_STORAGE) from exc
+    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise CaptureError("Image URL resolves to a non-public address", EXIT_INPUT)
+
+
+def download_image_assets(
+    vault: Path,
+    source_id: str,
+    markdown: str,
+    raw_images: Any,
+    source_url: str,
+) -> tuple[str, Path | None, list[tuple[Path, Path]]]:
+    if not isinstance(raw_images, list):
+        raise CaptureError("images must be a list", EXIT_INPUT)
+    images: list[dict[str, str]] = []
+    tokens: set[str] = set()
+    for raw in raw_images:
+        if not isinstance(raw, dict) or set(raw) != {"token", "url"}:
+            raise CaptureError("Each image must contain only token and url", EXIT_INPUT)
+        token = str(raw["token"])
+        url = str(raw["url"]).strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", token) or token in tokens:
+            raise CaptureError("Image tokens must be unique safe identifiers", EXIT_INPUT)
+        ensure_public_asset_url(url)
+        tokens.add(token)
+        images.append({"token": token, "url": url})
+    markdown_tokens = IMAGE_TOKEN_RE.findall(markdown)
+    if len(markdown_tokens) != len(set(markdown_tokens)) or set(markdown_tokens) != tokens:
+        raise CaptureError("Markdown image placeholders must match the image manifest exactly", EXIT_INPUT)
+    if not images:
+        return markdown, None, []
+
+    queue_root = vault_path(vault, ".queue")
+    queue_root.mkdir(parents=True, exist_ok=True)
+    temp_root = Path(tempfile.mkdtemp(prefix=f"vault-capture-{source_id}-", dir=queue_root))
+    moves: list[tuple[Path, Path]] = []
+    total = 0
+    rewritten = markdown
+    try:
+        for index, image in enumerate(images, start=1):
+            request = Request(
+                image["url"],
+                headers={"User-Agent": "vault-capture/1.0", "Referer": source_url},
+            )
+            try:
+                with urlopen(request, timeout=20) as response:
+                    ensure_public_asset_url(response.geturl())
+                    content_type = response.headers.get_content_type().lower()
+                    data = response.read(MAX_IMAGE_BYTES + 1)
+            except CaptureError:
+                raise
+            except Exception as exc:
+                raise CaptureError("Image download failed", EXIT_STORAGE) from exc
+            if len(data) > MAX_IMAGE_BYTES:
+                raise CaptureError("An image exceeds the 20 MB limit", EXIT_INPUT)
+            total += len(data)
+            if total > MAX_ARTICLE_IMAGE_BYTES:
+                raise CaptureError("Article images exceed the 100 MB limit", EXIT_INPUT)
+            image_type = IMAGE_TYPES.get(content_type)
+            if image_type is None or not image_type[1](data):
+                raise CaptureError("Image content type or signature is unsupported", EXIT_INPUT)
+            digest = hashlib.sha256(data).hexdigest()[:12]
+            filename = f"{index:03d}-{digest}.{image_type[0]}"
+            staged = temp_root / filename
+            staged.write_bytes(data)
+            destination = vault_path(vault, f"assets/images/{source_id}/{filename}")
+            moves.append((staged, destination))
+            rewritten = rewritten.replace(f"vault-image://{image['token']}", f"../../assets/images/{source_id}/{filename}")
+        return rewritten, temp_root, moves
+    except Exception:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+
+
 def yaml_scalar(value: Any) -> str:
     if value is None:
         return ""
@@ -146,16 +341,17 @@ def yaml_scalar(value: Any) -> str:
 def yaml_document(fields: list[tuple[str, Any]]) -> str:
     lines = ["---"]
     for key, value in fields:
-        if isinstance(value, list):
-            if value:
-                lines.append(f"{key}:")
-                lines.extend(f"  - {yaml_scalar(item)}" for item in value)
-            else:
-                lines.append(f"{key}: []")
-        else:
-            lines.append(f"{key}: {yaml_scalar(value)}")
+        lines.extend(yaml_field_lines(key, value))
     lines.append("---")
     return "\n".join(lines)
+
+
+def yaml_field_lines(key: str, value: Any) -> list[str]:
+    if isinstance(value, list):
+        if value:
+            return [f"{key}:", *(f"  - {yaml_scalar(item)}" for item in value)]
+        return [f"{key}: []"]
+    return [f"{key}: {yaml_scalar(value)}"]
 
 
 def split_frontmatter(text: str) -> tuple[str, str]:
@@ -193,17 +389,23 @@ def set_fields(text: str, updates: dict[str, Any]) -> str:
     lines = frontmatter.splitlines()
     seen: set[str] = set()
     output: list[str] = []
-    for line in lines:
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*):", line)
         if match and match.group(1) in updates:
             key = match.group(1)
-            output.append(f"{key}: {yaml_scalar(updates[key])}")
+            output.extend(yaml_field_lines(key, updates[key]))
             seen.add(key)
+            index += 1
+            while index < len(lines) and (lines[index].startswith(" ") or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*:", lines[index])):
+                index += 1
         else:
             output.append(line)
+            index += 1
     for key, value in updates.items():
         if key not in seen:
-            output.append(f"{key}: {yaml_scalar(value)}")
+            output.extend(yaml_field_lines(key, value))
     return f"---\n{'\n'.join(output)}\n---\n\n{body.lstrip()}"
 
 
@@ -214,6 +416,13 @@ def sanitize_filename(value: str, fallback: str) -> str:
     value = re.sub(r"\s+", "-", value)
     value = re.sub(r"-+", "-", value).strip("-.")
     return (value or fallback)[:80]
+
+
+def sanitize_component(value: str, fallback: str, limit: int) -> str:
+    value = inline(value) or fallback
+    value = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "-", value)
+    value = re.sub(r"\s+", " ", value).strip(" .")
+    return (value or fallback)[:limit].rstrip(" .")
 
 
 def new_id(timestamp: str) -> str:
@@ -394,7 +603,9 @@ def render_source(
     canonical_url: str,
     captured_at: str,
     status: str,
-    why_saved: str,
+    author: list[str],
+    publisher: str,
+    published: str,
     priority: int,
     topics: list[str],
     text: str,
@@ -403,12 +614,14 @@ def render_source(
         ("schema_version", 1),
         ("id", source_id),
         ("type", "source"),
+        ("aliases", [source_id]),
         ("medium", medium),
         ("title", title),
         ("url", url),
         ("canonical_url", canonical_url),
-        ("author", []),
-        ("published", None),
+        ("author", author),
+        ("publisher", publisher or None),
+        ("published", published or None),
         ("captured", captured_at),
         ("retrieved_at", None),
         ("language", None),
@@ -417,13 +630,12 @@ def render_source(
         ("engagement", "captured"),
         ("priority", priority),
         ("estimated_minutes", None),
-        ("why_saved", why_saved),
         ("capture_method", "openclaw"),
         ("topics", topics),
         ("tags", []),
     ]
     body_text = safe_user_text(text)
-    body = [f"# {inline(title)}", "", "> [!info] 来源"]
+    body = [f"# {inline(title) or source_id}", "", "> [!info] 来源"]
     if url:
         body.append(f"> [打开原网页]({url})")
     body.extend(["", "## 摘要", "", "", "## 原文", "", SOURCE_START, ""])
@@ -432,31 +644,6 @@ def render_source(
         body.append("")
     body.extend([SOURCE_END, ""])
     return yaml_document(fields) + "\n\n" + "\n".join(body)
-
-
-def append_capture_history(text: str, reason: str, captured_at: str) -> tuple[str, bool]:
-    reason = safe_user_text(reason)
-    if not reason:
-        return text, False
-    normalized = normalize_text(reason)
-    original = normalize_text(str(get_field(text, "why_saved", "")))
-    reason_key = content_hash(normalized)
-    if normalized == original or f"<!-- vault-capture:reason {reason_key} -->" in text:
-        return text, False
-    reason_lines = reason.splitlines() or [""]
-    rendered_reason = reason_lines[0]
-    if len(reason_lines) > 1:
-        rendered_reason += "\n" + "\n".join(f"  {line}" for line in reason_lines[1:])
-    addition = f"<!-- vault-capture:reason {reason_key} -->\n- {captured_at} — {rendered_reason}\n"
-    heading = "## 捕获历史"
-    if heading not in text:
-        block = f"\n{heading}\n\n{addition}\n"
-        marker = "\n## 摘要\n"
-        return (text.replace(marker, block + "## 摘要\n", 1) if marker in text else text + block), True
-    start = text.index(heading) + len(heading)
-    next_heading = text.find("\n## ", start)
-    insert_at = len(text) if next_heading < 0 else next_heading
-    return text[:insert_at].rstrip() + "\n" + addition + "\n" + text[insert_at:].lstrip("\n"), True
 
 
 def validate_annotations(raw: Any, default_time: str) -> list[dict[str, str]]:
@@ -468,6 +655,9 @@ def validate_annotations(raw: Any, default_time: str) -> list[dict[str, str]]:
     for item in raw:
         if not isinstance(item, dict):
             raise CaptureError("Each annotation must be an object", EXIT_INPUT)
+        unknown = sorted(set(item) - {"quote", "comment", "locator", "captured_at"})
+        if unknown:
+            raise CaptureError(f"Unsupported annotation fields: {', '.join(unknown)}", EXIT_INPUT)
         quote_text = safe_user_text(str(item.get("quote", "")))
         comment = safe_user_text(str(item.get("comment", "")))
         if not normalize_text(quote_text) and not normalize_text(comment):
@@ -489,10 +679,11 @@ def quote_markdown(value: str) -> str:
 
 def comment_markdown(value: str, captured_at: str, key: str) -> str:
     lines = value.splitlines() or [""]
-    rendered = f"- {captured_at} — {lines[0]}"
+    rendered = f"- {lines[0]}"
     if len(lines) > 1:
         rendered += "\n" + "\n".join(f"  {line}" for line in lines[1:])
-    return f"<!-- vault-capture:comment {key} -->\n{rendered}"
+    meta = json.dumps({"captured_at": captured_at, "key": key}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return f"<!-- vault-capture:comment {meta} -->\n{rendered}"
 
 
 def parse_entries(body: str) -> tuple[str, list[dict[str, Any]], str]:
@@ -516,7 +707,15 @@ def parse_entries(body: str) -> tuple[str, list[dict[str, Any]], str]:
         comments = meta.get("comments", [])
         if not isinstance(comments, list):
             raise CaptureError("Annotation comment metadata is invalid", EXIT_STORAGE)
-        entries.append({"meta": meta, "block": region[match.end() : block_end]})
+        block = region[match.end() : block_end]
+        legacy_heading = re.search(r"(?m)^## (?P<captured_at>\d{4}-\d{2}-\d{2}T\S+) · (?P<locator>.*)$", block)
+        if legacy_heading:
+            meta.setdefault("captured_at", legacy_heading.group("captured_at"))
+            locator = legacy_heading.group("locator").strip()
+            meta.setdefault("locator", "" if locator == "未定位" else locator)
+        meta.setdefault("captured_at", "")
+        meta.setdefault("locator", "")
+        entries.append({"meta": meta, "block": block})
     return prefix, entries, suffix
 
 
@@ -544,8 +743,9 @@ def render_rollup(
         ("schema_version", 1),
         ("id", annotation_id),
         ("type", "annotation"),
+        ("aliases", [annotation_id]),
         ("title", title),
-        ("source", f"[[{source_link}]]"),
+        ("source", f"[[{source_id}]]"),
         ("source_id", source_id),
         ("source_title", source_title),
         ("source_url", source_url),
@@ -577,13 +777,20 @@ def merge_rollup(
         comment_key = content_hash(comment_norm) if comment_norm else ""
         entry = by_key.get(key)
         if entry is None:
-            meta = {"key": key, "quote": bool(quote_norm), "comments": [comment_key] if comment_key else []}
-            locator = item["locator"] or "未定位"
-            block_parts = [f"\n\n## {item['captured_at']} · {locator}\n"]
+            meta = {
+                "captured_at": item["captured_at"],
+                "comments": [comment_key] if comment_key else [],
+                "key": key,
+                "locator": item["locator"],
+                "quote": bool(quote_norm),
+            }
+            block_parts = [""]
             if item["quote"]:
                 block_parts.extend(["", quote_markdown(item["quote"]), ""])
-            target = source_link + (f"#{item['locator'].replace(']', '')}" if item["locator"] else "")
-            block_parts.append(f"来源：[[{target}]]" + (f" · [原文]({source_url})" if source_url else ""))
+            locator = item["locator"].replace("]", "")
+            target = source_link + (f"#{locator}" if locator else "")
+            display = str(get_field(text, "source_title", "")) or source_link
+            block_parts.append(f"来源：[[{target}|{display}]]" + (f" · [原文]({source_url})" if source_url else ""))
             block_parts.extend(["", "评论：", ""])
             if comment_key:
                 block_parts.append(comment_markdown(item["comment"], item["captured_at"], comment_key))
@@ -599,9 +806,15 @@ def merge_rollup(
             added += 1
     kind, engagement = annotation_kind(entries)
     region_parts: list[str] = []
-    for entry in entries:
+    for index, entry in enumerate(entries, start=1):
         meta_json = json.dumps(entry["meta"], ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        region_parts.append(f"\n<!-- vault-capture:entry {meta_json} -->{entry['block'].rstrip()}\n")
+        block = re.sub(r"(?m)^\s*## .*?\n", "", entry["block"], count=1).strip()
+        block = re.sub(r"(?m)^<!-- vault-capture:comment ([a-f0-9]{64}) -->$", lambda match: (
+            "<!-- vault-capture:comment "
+            + json.dumps({"captured_at": entry["meta"].get("captured_at", ""), "key": match.group(1)}, separators=(",", ":"), sort_keys=True)
+            + " -->"
+        ), block)
+        region_parts.append(f"\n<!-- vault-capture:entry {meta_json} -->\n\n## 标注 {index}\n\n{block}\n")
     merged_body = prefix + "".join(region_parts) + suffix
     merged = f"---\n{frontmatter}\n---\n\n{merged_body.lstrip()}"
     merged = set_fields(merged, {"annotation_kind": kind, "engagement": engagement})
@@ -610,6 +823,16 @@ def merge_rollup(
 
 def replace_heading(body: str, title: str) -> str:
     return re.sub(r"(?m)^# .*$", f"# {inline(title)}", body, count=1)
+
+
+def normalize_rollup_links(text: str, source_id: str, source_title: str) -> str:
+    frontmatter, body = split_frontmatter(text)
+    pattern = re.compile(r"来源：\[\[[^\]#|]+(?P<anchor>#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+    body = pattern.sub(
+        lambda match: f"来源：[[{source_id}{match.group('anchor') or ''}|{source_title}]]",
+        body,
+    )
+    return f"---\n{frontmatter}\n---\n\n{body.lstrip()}"
 
 
 def replace_source_content(body: str, markdown: str) -> str:
@@ -661,6 +884,7 @@ def write_job(vault: Path, job: dict[str, Any]) -> None:
 
 
 def validate_stage(data: dict[str, Any]) -> dict[str, Any]:
+    reject_unknown_fields(data, STAGE_FIELDS, "stage")
     kind = str(data.get("kind", "web")).lower()
     if kind not in {"web", "transcript", "document", "ocr", "idea"}:
         raise CaptureError("Unsupported capture kind", EXIT_INPUT)
@@ -682,6 +906,9 @@ def validate_stage(data: dict[str, Any]) -> dict[str, Any]:
     medium = str(data.get("medium") or medium_default)
     if kind != "idea" and medium not in SOURCE_MEDIA:
         raise CaptureError("Unsupported Source medium", EXIT_INPUT)
+    author = validate_author(data.get("author"))
+    publisher = inline(str(data.get("publisher", "")))
+    published = validate_published(data.get("published"))
     return {
         "kind": kind,
         "captured_at": captured_at,
@@ -691,7 +918,9 @@ def validate_stage(data: dict[str, Any]) -> dict[str, Any]:
         "canonical_url": canonical_url,
         "title": inline(str(data.get("title", ""))),
         "text": text,
-        "why_saved": safe_user_text(str(data.get("why_saved", ""))),
+        "author": author,
+        "publisher": publisher,
+        "published": published,
         "medium": medium,
         "annotations": validate_annotations(data.get("annotations", []), captured_at),
     }
@@ -730,6 +959,7 @@ def stage_idea(vault: Path, data: dict[str, Any]) -> dict[str, Any]:
         "commit": commit,
         "job_created": False,
         "ingest_status": "ready",
+        "paths_final": True,
     }
 
 
@@ -742,12 +972,17 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
         is_new = source is None
         if is_new:
             source_id = new_id(data["captured_at"])
-            host = urlsplit(data["canonical_url"]).hostname if data["canonical_url"] else data["kind"]
-            title = data["title"] or (f"待抓取：{host}" if data["kind"] == "web" else f"待处理：{data['kind']}")
-            folder = "sources/web" if data["kind"] == "web" else (
-                "sources/transcripts" if data["kind"] == "transcript" else "sources/documents"
+            title = data["title"]
+            source = source_path_for(
+                vault,
+                data["kind"],
+                source_id,
+                title,
+                data["author"],
+                data["publisher"],
+                data["url"],
+                data["captured_at"],
             )
-            source = vault_path(vault, f"{folder}/{source_id}--{sanitize_filename(title, data['kind'])}.md")
             status = "pending" if data["kind"] == "web" else "manual"
             source_text = render_source(
                 source_id,
@@ -757,7 +992,9 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
                 data["canonical_url"],
                 data["captured_at"],
                 status,
-                data["why_saved"],
+                data["author"],
+                data["publisher"],
+                data["published"],
                 data["priority"],
                 data["topics"],
                 data["text"],
@@ -768,9 +1005,6 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
             title = str(get_field(source_text, "title"))
             status = str(get_field(source_text, "ingest_status"))
         changed_paths: list[Path] = []
-        history_added = False
-        if not is_new:
-            source_text, history_added = append_capture_history(source_text, data["why_saved"], data["captured_at"])
         rollups = find_rollups(vault, source_id)
         if len(rollups) > 1:
             raise CaptureError("More than one capture-managed Annotation rollup exists", EXIT_CONFLICT)
@@ -779,16 +1013,13 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
         if data["annotations"]:
             if rollup_path is None:
                 annotation_id = new_id(data["captured_at"])
-                rollup_title = f"{title}——批注"
-                rollup_path = vault_path(
-                    vault, f"notes/annotations/{annotation_id}--{sanitize_filename(rollup_title, 'annotations')}.md"
-                )
+                rollup_path = annotation_path_for(vault, source_id, source.stem if title else None)
                 rollup_text = render_rollup(
                     annotation_id,
                     source_id,
-                    title,
+                    title or source_id,
                     data["url"] or str(get_field(source_text, "url")),
-                    source.stem,
+                    source_id,
                     data["captured_at"],
                     data["topics"],
                 )
@@ -797,12 +1028,12 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
             rollup_text, annotation_added, _kind, engagement = merge_rollup(
                 rollup_text,
                 data["annotations"],
-                source.stem,
+                source_id,
                 data["url"] or str(get_field(source_text, "url")),
             )
             if annotation_added:
                 source_text = set_fields(source_text, {"engagement": engagement})
-        source_changed = is_new or history_added or annotation_added > 0
+        source_changed = is_new or annotation_added > 0
         if source_changed and not is_new and path_dirty(vault, source):
             raise CaptureError("Source has uncommitted changes", EXIT_CONFLICT, id=source_id)
         if annotation_added and rollup_path and rollup_path.exists() and path_dirty(vault, rollup_path):
@@ -838,6 +1069,7 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
                 "commit": None,
                 "job_created": False,
                 "ingest_status": status,
+                "paths_final": status != "pending" and bool(title),
             }
         message = (
             f"capture(source+annotations): add {source_id} with {annotation_added} entries"
@@ -862,7 +1094,7 @@ def cmd_stage(vault: Path, input_file: str | None = None) -> dict[str, Any]:
             "job_created": job_created,
             "ingest_status": status,
             "annotation_entries_added": annotation_added,
-            "capture_history_added": history_added,
+            "paths_final": not job_created and bool(title),
         }
 
 
@@ -875,10 +1107,16 @@ def job_source(vault: Path, job: dict[str, Any]) -> Path:
 
 def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> dict[str, Any]:
     data = read_json_input(input_file)
+    reject_unknown_fields(data, FINALIZE_FIELDS, "finalize")
     title = inline(str(data.get("title", "")))
     markdown = safe_user_text(str(data.get("markdown", "")))
     if not title or not markdown:
         raise CaptureError("finalize requires non-empty title and markdown", EXIT_INPUT)
+    if data.get("images_complete") is not True:
+        raise CaptureError("finalize requires images_complete: true", EXIT_INPUT)
+    author = validate_author(data.get("author"))
+    publisher = inline(str(data.get("publisher", "")))
+    published = validate_published(data.get("published"))
     retrieved_at = parse_time(data.get("retrieved_at"))
     summary = safe_user_text(str(data.get("summary", "")))
     language = inline(str(data.get("language", "")))
@@ -898,6 +1136,9 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
                 "commit": None,
                 "ingest_status": "ready",
                 "content_hash": get_field(source_text, "content_hash"),
+                "annotation_path": job.get("annotation_path"),
+                "asset_paths": job.get("asset_paths", []),
+                "paths_final": True,
             }
         rollups = find_rollups(vault, source_id)
         if len(rollups) > 1:
@@ -914,43 +1155,115 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
                 job["last_error"] = "Final URL matches another Source"
                 write_job(vault, job)
                 raise CaptureError("Final URL matches another Source", EXIT_CONFLICT, id=source_id)
-        text = source.read_text(encoding="utf-8")
-        frontmatter, body = split_frontmatter(text)
-        body = replace_heading(body, title)
-        body = replace_summary(body, summary)
-        body = replace_source_content(body, markdown)
-        text = f"---\n{frontmatter}\n---\n\n{body.lstrip()}"
-        updates: dict[str, Any] = {
-            "title": title,
-            "retrieved_at": retrieved_at,
-            "ingest_status": "ready",
-            "content_hash": content_hash(markdown),
-            "ingest_error": "",
-            "retry_after": "",
-        }
-        if canonical_final:
-            updates["canonical_url"] = canonical_final
-        if language:
-            updates["language"] = language
-        if summary:
-            updates["verification"] = "unverified"
-        text = set_fields(text, updates)
-        atomic_write(source, text)
-        changed = [source]
-        for rollup in rollups:
-            rollup_text = rollup.read_text(encoding="utf-8")
-            rollup_title = f"{title}——批注"
-            rollup_text = set_fields(rollup_text, {"title": rollup_title, "source_title": title})
-            fm, rollup_body = split_frontmatter(rollup_text)
-            rollup_body = replace_heading(rollup_body, rollup_title)
-            atomic_write(rollup, f"---\n{fm}\n---\n\n{rollup_body.lstrip()}")
-            changed.append(rollup)
+        source_text = source.read_text(encoding="utf-8")
+        source_url = final_url or str(get_field(source_text, "url"))
+        captured_at = str(get_field(source_text, "captured"))
+        final_source = source_path_for(
+            vault,
+            "web",
+            source_id,
+            title,
+            author,
+            publisher,
+            source_url,
+            captured_at,
+        )
+        if final_source != source and final_source.exists():
+            raise CaptureError("Final Source path already exists", EXIT_CONFLICT, id=source_id)
+        planned_final_rollup = annotation_path_for(vault, source_id, final_source.stem) if rollups else None
+        if planned_final_rollup and planned_final_rollup != rollups[0] and planned_final_rollup.exists():
+            raise CaptureError("Final Annotation path already exists", EXIT_CONFLICT, id=source_id)
+
+        temp_root: Path | None = None
+        moves: list[tuple[Path, Path]] = []
         try:
-            commit = commit_paths(vault, changed, f"ingest(source): fetch {source_id}")
-        except CaptureError:
-            job["state"] = "blocked_git"
+            markdown, temp_root, moves = download_image_assets(
+                vault,
+                source_id,
+                markdown,
+                data.get("images", []),
+                source_url,
+            )
+            for _staged, destination in moves:
+                if destination.exists():
+                    raise CaptureError("Final image path already exists", EXIT_CONFLICT, id=source_id)
+
+            frontmatter, body = split_frontmatter(source_text)
+            body = replace_heading(body, title)
+            body = replace_summary(body, summary)
+            body = replace_source_content(body, markdown)
+            text = f"---\n{frontmatter}\n---\n\n{body.lstrip()}"
+            updates: dict[str, Any] = {
+                "title": title,
+                "author": author,
+                "publisher": publisher,
+                "published": published,
+                "retrieved_at": retrieved_at,
+                "ingest_status": "ready",
+                "content_hash": content_hash(markdown),
+                "ingest_error": "",
+                "retry_after": "",
+            }
+            if canonical_final:
+                updates["canonical_url"] = canonical_final
+            if language:
+                updates["language"] = language
+            if summary:
+                updates["verification"] = "unverified"
+            text = set_fields(text, updates)
+            atomic_write(source, text)
+
+            changed = [source]
+            if final_source != source:
+                os.replace(source, final_source)
+                changed.append(final_source)
+
+            final_rollup: Path | None = None
+            for rollup in rollups:
+                rollup_text = rollup.read_text(encoding="utf-8")
+                rollup_title = f"{title}——批注"
+                rollup_text = set_fields(
+                    rollup_text,
+                    {
+                        "title": rollup_title,
+                        "source": f"[[{source_id}]]",
+                        "source_title": title,
+                        "source_url": source_url,
+                    },
+                )
+                rollup_text = normalize_rollup_links(rollup_text, source_id, title)
+                rollup_text, _added, _kind, _engagement = merge_rollup(rollup_text, [], source_id, source_url)
+                fm, rollup_body = split_frontmatter(rollup_text)
+                rollup_body = replace_heading(rollup_body, rollup_title)
+                atomic_write(rollup, f"---\n{fm}\n---\n\n{rollup_body.lstrip()}")
+                final_rollup = planned_final_rollup
+                assert final_rollup is not None
+                if final_rollup != rollup:
+                    os.replace(rollup, final_rollup)
+                    changed.extend([rollup, final_rollup])
+                else:
+                    changed.append(rollup)
+
+            asset_paths: list[Path] = []
+            for staged, destination in moves:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged, destination)
+                asset_paths.append(destination)
+                changed.append(destination)
+
+            job["source_path"] = relative(vault, final_source)
+            job["annotation_path"] = relative(vault, final_rollup) if final_rollup else None
+            job["asset_paths"] = [relative(vault, path) for path in asset_paths]
             write_job(vault, job)
-            raise
+            try:
+                commit = commit_paths(vault, changed, f"ingest(source): fetch {source_id}")
+            except CaptureError:
+                job["state"] = "blocked_git"
+                write_job(vault, job)
+                raise
+        finally:
+            if temp_root:
+                shutil.rmtree(temp_root, ignore_errors=True)
         job["state"] = "ready"
         job["attempts"] = int(job.get("attempts", 0)) + 1
         job["completed_at"] = retrieved_at
@@ -959,11 +1272,14 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
         return {
             "ok": True,
             "id": source_id,
-            "source_path": relative(vault, source),
+            "source_path": relative(vault, final_source),
+            "annotation_path": job.get("annotation_path"),
+            "asset_paths": job.get("asset_paths", []),
             "committed": True,
             "commit": commit,
             "ingest_status": "ready",
             "content_hash": updates["content_hash"],
+            "paths_final": True,
         }
 
 
@@ -1015,6 +1331,7 @@ def cmd_fail(vault: Path, source_id: str, input_file: str | None = None) -> dict
             "commit": commit,
             "ingest_status": status,
             "error": error,
+            "paths_final": False,
         }
 
 
@@ -1028,6 +1345,9 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
         "attempts": job.get("attempts", 0),
         "last_error": job.get("last_error", ""),
         "retry_after": job.get("retry_after", ""),
+        "annotation_path": job.get("annotation_path"),
+        "asset_paths": job.get("asset_paths", []),
+        "paths_final": job.get("state") == "ready",
     }
 
 
@@ -1042,6 +1362,9 @@ def cmd_inspect(vault: Path, source_id: str) -> dict[str, Any]:
         if source is None:
             raise CaptureError("Source not found", EXIT_INPUT)
         public = None
+    rollups = find_rollups(vault, source_id)
+    annotation_path = public.get("annotation_path") if public else (relative(vault, rollups[0]) if len(rollups) == 1 else None)
+    paths_final = bool(public and public.get("state") == "ready") if public else source.stem != source_id
     text = source.read_text(encoding="utf-8")
     return {
         "ok": True,
@@ -1049,6 +1372,9 @@ def cmd_inspect(vault: Path, source_id: str) -> dict[str, Any]:
         "source_path": relative(vault, source),
         "ingest_status": get_field(text, "ingest_status"),
         "title": get_field(text, "title"),
+        "annotation_path": annotation_path,
+        "asset_paths": public.get("asset_paths", []) if public else [],
+        "paths_final": paths_final,
     }
 
 

@@ -18,7 +18,6 @@ ingest_status: ready
 read_status: reading
 engagement: highlighted
 priority: 2
-why_saved: 嘉宾讨论了复习与理解的区别
 capture_method: openclaw
 topics:
   - "[[学习方法]]"
@@ -38,4 +37,3 @@ tags: []
 ## 00:21:10 笔记的作用
 
 **Guest：** 一篇笔记真正有价值的部分，通常是你为了写清楚而不得不作出的判断。
-

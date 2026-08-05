@@ -31,7 +31,7 @@ PDF 文件本身是 Source，不是 Analysis。对 PDF 的系统性思考才是 
 为值得进入知识库的文献创建：
 
 ```text
-sources/documents/<id>--<标题>.md
+sources/documents/<作者>--<标题>--<收录日期>--<source-id>.md
 ```
 
 最小元信息：
@@ -43,7 +43,7 @@ id: 20260725-110000-r4p2
 type: source
 medium: paper
 title: 论文标题
-authors:
+author:
   - Author One
   - Author Two
 year: 2026
@@ -56,7 +56,6 @@ captured: 2026-07-25T11:00:00+08:00
 ingest_status: ready
 read_status: unread
 engagement: captured
-why_saved: 与正在研究的问题直接相关
 ---
 ```
 
@@ -67,7 +66,7 @@ why_saved: 与正在研究的问题直接相关
 原始划线可以留在 Zotero。进入 Obsidian 时，统一导出到：
 
 ```text
-notes/annotations/<id>--<标题>-批注.md
+notes/annotations/annotated_<作者>--<标题>--<收录日期>--<source-id>.md
 ```
 
 每项至少包括：
@@ -138,4 +137,3 @@ text_quality: unreviewed    # unreviewed / reviewed
 - 文件主要是说明书、内部报告或临时材料。
 
 只要学术论文阅读成为常态，就采用 Zotero + Obsidian，避免后期重新整理书目信息。
-

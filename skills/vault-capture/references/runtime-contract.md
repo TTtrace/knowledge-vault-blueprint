@@ -25,7 +25,9 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
   "url": "https://example.com/article",
   "title": "optional user-supplied title",
   "text": "source text or personal idea",
-  "why_saved": "preserve exactly",
+  "author": ["optional confirmed author"],
+  "publisher": "optional publisher, account, organization, or site",
+  "published": "optional YYYY-MM-DD",
   "topics": ["知识管理"],
   "priority": 2,
   "medium": "optional allowed Source medium",
@@ -41,7 +43,9 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 }
 ```
 
-`web` 必须提供 HTTP(S) URL；`idea` 必须提供 `text`。v1 会把 `transcript`、`document` 和 `ocr` 可靠保存为 `manual`，且不创建后台任务。每条 annotation 必须包含引文或评论。
+`stage` 使用严格字段白名单；未知字段（包括已删除的 `why_saved`）返回退出码 `2`。`web` 必须提供 HTTP(S) URL；`idea` 必须提供 `text`。v1 会把 `transcript`、`document` 和 `ocr` 可靠保存为 `manual`，且不创建后台任务。每条 annotation 必须包含引文或评论。
+
+缺少正式标题时，Source 仅使用 `<source-id>.md`，Annotation 仅使用 `annotated_<source-id>.md`。不得生成“待抓取”“待处理”或域名伪标题。提供可靠标题时可以直接使用最终命名；网页后台任务返回的路径仍视为临时路径，直到 `finalize` 成功。
 
 `stage` 的关键输出字段：
 
@@ -55,7 +59,8 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
   "committed": true,
   "commit": "Git commit hash or null",
   "job_created": true,
-  "ingest_status": "pending | ready | failed | manual"
+  "ingest_status": "pending | ready | failed | manual",
+  "paths_final": false
 }
 ```
 
@@ -63,7 +68,25 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 ## `finalize` 与 `fail` 输入
 
-`finalize` 要求非空的 `title` 和 `markdown`；`summary`、`final_url`、`retrieved_at` 和 `language` 可选。脚本负责计算 `content_hash`；存在摘要时设置 `verification: unverified`；只有 Git 提交成功后，才把队列和 Source 改为 `ready`。
+`finalize` 使用严格字段白名单，要求非空 `title`、`markdown` 以及 `images_complete: true`。`author` 必须为字符串列表；`publisher`、`published`、`summary`、`final_url`、`retrieved_at` 和 `language` 可选。图片协议如下：
+
+```json
+{
+  "title": "Page title",
+  "author": ["Author"],
+  "publisher": "Site or account",
+  "published": "2026-08-01",
+  "markdown": "![Alt](vault-image://image-1)",
+  "images": [
+    {"token": "image-1", "url": "https://example.com/image.png"}
+  ],
+  "images_complete": true
+}
+```
+
+每个 token 必须安全、唯一，并在 Markdown 中恰好出现一次；Markdown 中的占位符与 `images` 必须完全一致。脚本把图片写入 `assets/images/<source-id>/`，按正文顺序命名为 `<三位序号>-<内容哈希前12位>.<扩展名>`，再把占位符改为标准相对 Markdown 链接。允许 JPEG、PNG、WebP、GIF；单图上限 20 MB，单篇合计上限 100 MB。图片 URL 必须是公开 HTTP(S) 地址；任一图片失败时不得写入正文或设置 `ready`。
+
+完成后 Source 使用 `<作者>--<正式标题>--<captured日期>--<source-id>.md`，Annotation 使用 `annotated_<作者>--<正式标题>--<captured日期>--<source-id>.md`。作者按署名、publisher、域名、`未知作者` 的顺序回退。作者和标题文件名部分分别限制为 32 与 80 字符，frontmatter 保留完整值。脚本负责计算 `content_hash`；存在摘要时设置 `verification: unverified`；只有 Source、Annotation、图片和 Git 提交全部成功后才把队列与 Source 改为 `ready`。输出返回最终 `source_path`、`annotation_path`、`asset_paths` 和 `paths_final: true`。
 
 `fail` 接受：
 
@@ -85,7 +108,9 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 - 含引文的单元按规范化后的引文精确匹配；
 - 只有评论的单元按规范化后的评论精确匹配；
 - 同一引文出现新评论时追加评论，并保留旧评论；
-- 在每个新增单元或评论旁记录捕获时间；
+- 使用 `## 标注 1`、`## 标注 2` 顺序呈现引用单元；
+- 捕获时间、locator、评论时间和去重键只写入隐藏管理元数据，不在标题或评论正文中显示；
+- 有 locator 时只把它用于 Source 链接锚点；没有时不得输出“未定位”；
 - 根据全部单元聚合 `annotation_kind` 和 `engagement`。
 
 ## 重试状态

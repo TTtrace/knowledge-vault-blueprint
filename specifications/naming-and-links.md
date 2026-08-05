@@ -9,7 +9,7 @@
 
 ## 2. 文件命名
 
-推荐：
+人工笔记推荐：
 
 ```text
 <id>--<可读标题>.md
@@ -26,6 +26,22 @@
 - ID 防止同名冲突。
 - 标题便于搜索和文件浏览。
 - 标题变化时仍可通过 frontmatter `id` 识别身份。
+
+捕获型 Source 在未知正式标题时仅使用 `<source-id>.md`。完成处理后统一重命名为：
+
+```text
+<作者>--<正式标题>--<YYYY-MM-DD>--<source-id>.md
+```
+
+捕获流程管理的一对一 Annotation 汇总文件使用：
+
+```text
+annotated_<作者>--<正式标题>--<YYYY-MM-DD>--<source-id>.md
+```
+
+作者按正式署名、出版者/账号/组织/站点、URL 域名、`未知作者` 的顺序回退；多个作者以 `、` 连接。日期取 Source 的 `captured` 本地日期。作者与标题文件名部分分别最多保留 32 与 80 字符，frontmatter 始终保留完整值。
+
+捕获型 Source 把 `source_id` 保存为 alias，关系链接使用 `[[<source-id>|<正式标题>]]`，使临时文件重命名不破坏链接。Annotation 仍保留独立 frontmatter `id`，但上述一对一汇总文件以 `source_id` 命名。
 
 避免使用：
 
@@ -48,7 +64,7 @@ YYYYMMDD-HHMMSS-xxxx
 - 创建后永不改变。
 - 自动化必须在写入前生成。
 - `xxxx` 为随机后缀，防止同秒创建冲突。
-- 文件名与属性 `id` 应一致。
+- 除捕获流程管理的一对一 Annotation 汇总文件外，文件名与属性 `id` 应一致。
 - Yanki `noteId` 是外部绑定字段，不是 Vault ID。
 
 ## 4. 内部链接
@@ -154,4 +170,3 @@ MOC 不是自动链接清单；它是人工维护的导航与结构说明。
 - `anki-source`
 
 抓取、阅读、成熟度和类型均已有独立属性，不再重复编码为标签。
-

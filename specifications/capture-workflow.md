@@ -16,7 +16,7 @@
 ```mermaid
 flowchart TD
     A["收到 URL / 文本"] --> B["规范化并检查重复"]
-    B --> C["生成 ID 和最终文件路径"]
+    B --> C["生成 ID 和临时文件路径"]
     C --> D["写入 Source 占位文件"]
     D --> E["Git 提交：capture stub"]
     E --> F["创建后台任务"]
@@ -41,7 +41,6 @@ flowchart TD
 
 ```text
 收：https://example.com/article
-原因：作者可能给出了反对“知识等于信息”的好论证
 主题：知识管理, 学习
 优先级：2
 ```
@@ -50,7 +49,6 @@ flowchart TD
 
 ```text
 转写：https://video.example/123
-原因：需要保留 15 分钟以后关于 spaced repetition 的部分
 语言：en
 ```
 
@@ -65,12 +63,11 @@ flowchart TD
 
 ```text
 收：https://example.com/article
-原因：作者可能给出了反对“知识等于信息”的好论证
 主题：知识管理, 学习
 优先级：2
 批注：
 > 稍后读列表管理的不是文章，而是一个人未来愿意投入的注意力。
-评论：这解释了为什么 why_saved 比自动摘要更重要。
+评论：这解释了为什么收藏不等于理解。
 ---
 > 收藏只降低了未来再次找到信息的成本。
 评论：但这可能窄化了“理解”。
@@ -90,7 +87,6 @@ flowchart TD
 发现重复时不静默创建新 Source。可选择：
 
 - 返回现有笔记。
-- 保留原 `why_saved`，将新的保存理由与时间追加到正文的“捕获历史”。
 - 若网页内容确实是不同版本，显式创建 revision。
 - 新批注合并到该 Source 已有的 Annotation 文件，而不是新建 Source 或第二个 Annotation 汇总文件。
 
@@ -115,6 +111,8 @@ flowchart TD
 - refresh 前计算 `content_hash`。
 - 内容变化时生成独立 Git 提交，不覆盖无法追踪的历史。
 - 页面噪声、导航、推荐列表和评论区应在转换时清理。
+- 保留标题层级、段落、引用、列表、表格、代码、强调、链接、正文图片和图注的原始顺序；不得用摘要或连续纯文本替代原文结构。
+- 正文图片下载到 `assets/images/<source-id>/`，并改写为标准相对 Markdown 链接。任一有效正文图片失败时不得标记 `ready`。
 - 保留标题、作者、发布时间、URL 和抓取时间。
 - Annotation 中保存的引文是用户标注时看到的版本，refresh Source 正文时不得回写或覆盖这些引文。
 
@@ -187,7 +185,7 @@ transcribe(source): add transcript <id>
 ### 11.2 原子落盘与 Git
 
 1. 规范化输入并完成 Source 去重。
-2. 原子写入新的 Source 占位或更新已有 Source 的捕获历史。
+2. 原子写入新的 Source 占位；未知正式标题时仅使用 `<source-id>.md`。
 3. 原子创建或更新该 Source 唯一的 Annotation 文件。
 4. Source 与 Annotation 的本次变更生成一次 `capture(source+annotations)` 提交；无批注时使用 `capture(source)`。
 5. 正文抓取在后台独立执行，成功或失败状态生成第二次提交。
@@ -198,28 +196,29 @@ transcribe(source): add transcript <id>
 
 - frontmatter 保留 `source`、`source_id`、`source_title`、`source_url`、`annotation_kind`、`engagement` 和首次创建时间 `created`。
 - 汇总文件不使用单个顶层 `locator` 代表全部批注；定位信息写入每个引用单元。
-- 每个引用单元记录本次捕获时间、可选 locator、引文、Source WikiLink、外部 URL 和零条或多条评论。
-- 后续追加不得修改 `created`，也不新增通用 `updated`；具体新增内容在正文旁记录捕获时间，文件整体修改历史由 Git 和 `file.mtime` 提供。
+- 每个引用单元使用 `## 标注 1`、`## 标注 2` 顺序编号，并保存引文、Source WikiLink、外部 URL 和零条或多条评论。
+- 捕获时间、可选 locator、评论时间和去重键只保存在隐藏管理元数据中；有 locator 时用于 Source 链接锚点，没有时不得显示“未定位”。
+- 后续追加不得修改 `created`，也不新增通用 `updated`；文件整体修改历史由 Git 和 `file.mtime` 提供。
 
 推荐正文：
 
 ```markdown
-## 2026-08-04T09:30:00+08:00 · 稍后读的真正约束
+## 标注 1
 
 > 稍后读列表管理的不是文章，而是一个人未来愿意投入的注意力。
 
-来源：[[来源#稍后读的真正约束]] · [原文](https://example.com/article)
+来源：[[来源-id#稍后读的真正约束|来源标题]] · [原文](https://example.com/article)
 
 评论：
 
-- 2026-08-04T09:30:00+08:00 — 这解释了为什么 why_saved 比自动摘要更重要。
+- 这解释了为什么收藏不等于理解。
 ```
 
 ### 11.4 重复捕获
 
-- 命中已有 Source 时不创建新 Source；新保存理由追加到“捕获历史”。
+- 命中已有 Source 时不创建新 Source；只合并新增批注或其他受支持的结构化信息。
 - 若该 Source 尚无 Annotation，则首次创建；若已有，则按 §11.1 合并。
-- 重复输入没有产生任何新理由、引文或评论时返回现有记录，不生成空提交。
+- 重复输入没有产生任何新引文、评论或其他受支持变更时返回现有记录，不生成空提交。
 - Annotation 文件使用首次创建时生成的永久 ID 和稳定文件名，后续捕获不重命名。
 
 ### 11.5 失败边界
@@ -228,3 +227,16 @@ transcribe(source): add transcript <id>
 - 后来抓取的正文与既有引文不一致时，以 Annotation 内保存的引文为准。
 - 纯评论无引文时允许落盘，但必须保留捕获时间和 Source 链接；可在之后补充定位。
 - 目标 Source 或 Annotation 存在未提交人工修改时，自动化必须停止合并并报告冲突，不得覆盖。
+
+## 12. 通用 Source 完成契约
+
+网页是首个实现自动完成阶段的 Source，但 Transcript、Document 和 OCR 的未来处理器必须复用同一契约：
+
+- 未知正式标题时只使用 ID 临时文件，不生成“待处理”或来源域名伪标题。
+- Transcript 保留说话者、段落、时间戳、章节和原始语言；摘要或整理稿不得替代 transcript。
+- Document 保留标题层级、页序、列表、表格、脚注、代码、图片和图注，并稳定链接原始文件。
+- OCR 保留页序、段落边界、图片对应关系和未核验状态，不得把识别结果冒充已核验原文。
+- 音频、视频、PDF 和原始图片等附件保持可追溯；处理失败不得丢失初始输入。
+- 正文、附件、正式命名、Annotation 链接和状态在同一完成事务中更新；不完整时不得标记 `ready`。
+
+v1 的 Transcript、Document 和 OCR 仍只落盘为 `manual`，本节不授权自动转写、解析或 OCR。

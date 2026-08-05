@@ -69,6 +69,8 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 - 小型音频片段。
 - 模板、Bases 和脚本。
 
+网页捕获的正文图片统一放在 `assets/images/<source-id>/`，与完成后的 Source 和 Annotation 由同一次 `ingest(source)` 提交。图片先下载到 `.queue/` 下的临时目录；清单不完整、格式不支持或任一下载失败时，不提交附件，也不得把 Source 标记为 `ready`。
+
 不适合：
 
 - 大量 PDF。
@@ -110,4 +112,3 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 - 验证一条 Zotero 来源记录能够打开原 PDF。
 - 验证 Yanki 卡片的 `noteId` 仍在。
 - 验证离线备份可读取。
-

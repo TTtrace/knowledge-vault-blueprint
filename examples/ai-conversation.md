@@ -13,7 +13,6 @@ ingest_status: ready
 read_status: read
 engagement: annotated
 verification: unverified
-why_saved: 对话促成了抓取状态与阅读状态分离的设计
 topics:
   - "[[知识管理]]"
 tags: []
@@ -31,4 +30,3 @@ tags: []
 ## 我的批注
 
 这个区分应进入 schema，而不是只存在于工作流说明中。
-

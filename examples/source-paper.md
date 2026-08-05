@@ -22,7 +22,6 @@ ingest_status: ready
 read_status: reading
 engagement: annotated
 priority: 1
-why_saved: 需要核实检索练习对迁移任务的效果
 language: en
 topics:
   - "[[检索练习]]"
@@ -43,4 +42,3 @@ tags: []
 ## 为什么读
 
 需要区分论文证明的是短期回忆、长期保持，还是对新问题的迁移。
-

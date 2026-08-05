@@ -59,6 +59,7 @@ YYYYMMDD-HHMMSS-xxxx
 | `url` | text | 视情况 | 用户输入的原始 URL |
 | `canonical_url` | text | 视情况 | 去跟踪参数后的去重 URL |
 | `author` | list | 否 | 网页等简易作者列表 |
+| `publisher` | text | 否 | 出版者、微信公众号、组织或站点名 |
 | `published` | date | 否 | 发布时间 |
 | `captured` | datetime | 是 | 捕获时间 |
 | `retrieved_at` | datetime | 否 | 正文获取成功时间 |
@@ -68,7 +69,6 @@ YYYYMMDD-HHMMSS-xxxx
 | `engagement` | text | 是 | `captured`, `highlighted`, `annotated`, `analyzed`, `synthesized` |
 | `priority` | number | 否 | `1` 最高，建议只用 `1`–`3` |
 | `estimated_minutes` | number | 否 | 预计阅读时间 |
-| `why_saved` | text | 强烈建议 | 保存此材料的理由 |
 | `capture_method` | text | 否 | `openclaw`, `web_clipper`, `manual`, `zotero` |
 | `content_hash` | text | 自动化 | 用于检测正文变化 |
 | `ingest_error` | text | 失败时 | 简短错误摘要 |
@@ -88,6 +88,7 @@ url: https://example.com/article
 canonical_url: https://example.com/article
 author:
   - 作者
+publisher: 示例站点
 published: 2026-07-20
 captured: 2026-07-25T14:32:10+08:00
 retrieved_at: 2026-07-25T14:32:18+08:00
@@ -97,7 +98,6 @@ read_status: unread
 engagement: captured
 priority: 2
 estimated_minutes: 15
-why_saved: 想理解作者如何区分记忆和理解
 capture_method: openclaw
 topics:
   - "[[知识管理]]"
