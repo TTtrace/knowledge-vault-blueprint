@@ -106,7 +106,7 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 
 非空的 `agents.list[].skills` 是该 agent 的最终列表，不与默认列表自动合并。Allowlist 只控制 skill 可见性，不替代 sandbox、操作系统用户隔离、命令权限和文件权限。
 
-`vault-capture` 还要求目标 agent 能使用 `exec`、`web_fetch`、`sessions_spawn` 和 `browser`，且 sandbox 对 `VAULT_ROOT` 具有写权限。`VAULT_ROOT` 的真实绝对路径只能保存在主机配置或 SecretRef 中，不得写入本仓库。
+`vault-capture` 还要求目标 agent 能使用 `exec`、`sessions_spawn`，且 sandbox 对 `VAULT_ROOT` 具有写权限。网页正文抓取由仓库自有的 `ingest-web` 命令完成（Trafilatura + WeChat 适配 + Playwright 只读回退），不再依赖 agent 的 `web_fetch` 或 Browser 工具；`VAULT_ROOT` 的真实绝对路径只能保存在主机配置或 SecretRef 中，不得写入本仓库。
 
 `skills.entries.vault-capture.env` 只注入宿主 agent run。若该 agent 开启 Docker sandbox，`exec` 不继承宿主环境，必须同时：
 

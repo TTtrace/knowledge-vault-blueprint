@@ -23,6 +23,19 @@
 | D-015 | OpenClaw skill 候选版本先在 Linux 验证再晋级稳定版 | accepted |
 | D-016 | Vault 捕获自动化只暂存，不自动提交 | accepted |
 
+## D-017：确定性网页抓取运行时与迁移边界
+
+**决定**：`vault-capture` 的网页正文抓取改用仓库自有的确定性运行时，而不是依赖 agent 的 `web_fetch`/Browser 工具。固定使用 Trafilatura 作为通用正文选择与 HTML 清洗，WeChat 站点专用适配处理 `#js_content`、懒加载图片与挑战页，Playwright 作为只读渲染回退；`ingest-web <id>` 是唯一新增的会改变状态的网页入口，直接复用既有原子 `finalize`/`fail` 事务。正文 Markdown 不经过 agent 或 chat 载荷。
+
+**理由**：
+
+- agent `web_fetch` 存在响应截断、仅标题/元数据提取、运行时无 Browser 工具等不可确定问题，无法作为可执行质量门槛。
+- Trafilatura 与 Playwright 均为 Python 生态、维护活跃，符合 skill 现有 Python 运行时。
+- 静态抓取优先、渲染回退按需，平衡速度与健壮性；WeChat 访问模型需要真实浏览会话且状态多变，故保留专用适配与 `manual` 边界。
+- 质量门槛是确定性阈值（标题缺失、正文过短、挑战页、超限、图片清单不一致），不是提示词判断。
+
+**边界**：`schema_version` 保持 `1`，不改变既有字段含义。现有受管 Annotation 汇总仅在被捕获追加/`finalize` 显式触达时归一化到新布局，不做全库或正式 Vault 迁移。浏览器 profile/cookie 状态位于两个仓库之外，由配置提供、不打印、不暂存。依赖与浏览器安装只走一次性验证路径，不修改全局 Python 或默认浏览器安装。
+
 ## D-001：单 Vault
 
 **决定**：日记允许 AI 访问，因此日记和知识笔记保存在同一个 Git 仓库与 Obsidian Vault。

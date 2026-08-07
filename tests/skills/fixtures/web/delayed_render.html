@@ -1,0 +1,15 @@
+﻿<!DOCTYPE html>
+<html>
+<head><title>Delayed Render Article</title></head>
+<body>
+<div id="content">
+<p id="placeholder">Loading...</p>
+</div>
+<script>
+document.getElementById("placeholder").remove();
+var article = document.createElement("article");
+article.innerHTML = "<h1>Delayed Render Title</h1><p>This article content was rendered by JavaScript after initial page load and contains enough body text to pass the minimum character threshold for the deterministic extraction quality gate. It includes a body image.</p><img src=\"https://images.example.com/delayed.jpg\" alt=\"Delayed image\"><p>Another paragraph with sufficient body text to ensure the extraction quality gate passes the minimum body character count threshold for deterministic article capture.</p>";
+document.getElementById("content").appendChild(article);
+</script>
+</body>
+</html>

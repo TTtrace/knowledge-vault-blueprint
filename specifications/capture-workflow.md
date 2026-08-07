@@ -115,6 +115,7 @@ flowchart TD
 - 正文图片下载到 `assets/images/<source-id>/`，并改写为标准相对 Markdown 链接。任一有效正文图片失败时不得标记 `ready`。
 - 保留标题、作者、发布时间、URL 和抓取时间。
 - Annotation 中保存的引文是用户标注时看到的版本，refresh Source 正文时不得回写或覆盖这些引文。
+- 网页正文抓取通过仓库自有的确定性 `ingest-web` 命令完成：静态抓取优先，WeChat 站点专用适配，不足时用只读 Playwright 渲染回退；完整读取响应、提取正文与元数据、生成 `vault-image://` token 图片清单，并直接复用原子 `finalize`/`fail` 事务。正文 Markdown 不经过 agent 或 chat 载荷往返。详见 `skills/vault-capture/references/web-runtime.md`。
 
 ## 7. Transcript
 
@@ -190,23 +191,32 @@ verification: unverified
 
 - frontmatter 保留 `source`、`source_id`、`source_title`、`source_url`、`annotation_kind`、`engagement` 和首次创建时间 `created`。
 - 汇总文件不使用单个顶层 `locator` 代表全部批注；定位信息写入每个引用单元。
-- 每个引用单元使用 `## 标注 1`、`## 标注 2` 顺序编号，并保存引文、Source WikiLink、外部 URL 和零条或多条评论。
+- 每个引用单元使用 `## 标注 1`、`## 标注 2` 顺序编号，并保存引文和零条或多条评论。
 - 捕获时间、可选 locator、评论时间和去重键只保存在隐藏管理元数据中；有 locator 时用于 Source 链接锚点，没有时不得显示“未定位”。
 - 后续追加不得修改 `created`，也不新增通用 `updated`；文件整体修改历史由 Git 和 `file.mtime` 提供。
 
 推荐正文：
 
 ```markdown
+# 来源标题——批注
+
+来源：[[来源-id|来源标题]] · [原文](https://example.com/article)
+
+<!-- vault-capture:annotation-rollup -->
+<!-- vault-capture:entries:start -->
+
 ## 标注 1
 
 > 稍后读列表管理的不是文章，而是一个人未来愿意投入的注意力。
 
-来源：[[来源-id#稍后读的真正约束|来源标题]] · [原文](https://example.com/article)
-
-评论：
+批注：
 
 - 这解释了为什么收藏不等于理解。
+<!-- vault-capture:entries:end -->
 ```
+
+- 汇总正文在 H1 下方恰好呈现一行 `来源：... · [原文](...)`，不渲染 `## 摘录与批注`，也不在每个编号单元内重复来源行。
+- 只有该单元实际包含用户批注时才呈现 `批注：` 及其列表；纯评论单元仍用 `批注：`，全文不出现面向用户的 `评论：`。
 
 ### 11.4 重复捕获
 

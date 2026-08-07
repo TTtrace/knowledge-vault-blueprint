@@ -17,3 +17,11 @@ desktop.ini
 secrets/
 
 *.pyc
+
+# Web runtime disposable artifacts (never committed)
+skills/vault-capture/.venv/
+skills/vault-capture/__pycache__/
+tests/skills/__pycache__/
+skills/vault-capture/scripts/__pycache__/
+.venv/
+__pycache__/

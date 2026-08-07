@@ -183,7 +183,7 @@ Analysis 是系统性阅读成果，不是原文副本。推荐结构：
 3. 立即写入 Source 占位笔记并加入 Git 暂存区。
 4. 创建后台抓取任务。
 5. 普通网页尽快执行；视频转写、OCR 和登录站点进入慢队列。
-6. 成功后填入正文、摘要和 `retrieved_at`。
+6. 网页正文通过仓库自有的确定性 `ingest-web` 抓取（Trafilatura + WeChat 适配 + Playwright 只读回退），成功后填入正文、摘要和 `retrieved_at`。
 7. 失败后保留占位文件，设置 `ingest_status: failed` 和错误信息。
 
 推荐的手机输入格式：

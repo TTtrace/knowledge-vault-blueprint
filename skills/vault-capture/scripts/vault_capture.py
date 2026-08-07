@@ -21,6 +21,12 @@ import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterator
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import web_extract
+except ImportError:
+    web_extract = None  # type: ignore[assignment]
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
@@ -60,6 +66,7 @@ FINALIZE_FIELDS = {
     "final_url",
     "retrieved_at",
     "language",
+    "methods_attempted",
 }
 IMAGE_TOKEN_RE = re.compile(r"vault-image://([a-zA-Z0-9_-]+)")
 IMAGE_TYPES = {
@@ -756,7 +763,8 @@ def render_rollup(
         ("topics", topics),
         ("tags", []),
     ]
-    body = f"# {inline(title)}\n\n{ROLLUP_MARKER}\n\n## 摘录与批注\n\n{ENTRIES_START}\n{ENTRIES_END}\n"
+    source_line = f"来源：[[{source_id}|{inline(source_title)}]] · [原文]({source_url})"
+    body = f"# {inline(title)}\n\n{source_line}\n\n{ROLLUP_MARKER}\n\n{ENTRIES_START}\n{ENTRIES_END}\n"
     return yaml_document(fields) + "\n\n" + body
 
 
@@ -787,12 +795,8 @@ def merge_rollup(
             block_parts = [""]
             if item["quote"]:
                 block_parts.extend(["", quote_markdown(item["quote"]), ""])
-            locator = item["locator"].replace("]", "")
-            target = source_link + (f"#{locator}" if locator else "")
-            display = str(get_field(text, "source_title", "")) or source_link
-            block_parts.append(f"来源：[[{target}|{display}]]" + (f" · [原文]({source_url})" if source_url else ""))
-            block_parts.extend(["", "评论：", ""])
             if comment_key:
+                block_parts.extend(["", "批注：", ""])
                 block_parts.append(comment_markdown(item["comment"], item["captured_at"], comment_key))
             entry = {"meta": meta, "block": "\n".join(block_parts).rstrip() + "\n"}
             entries.append(entry)
@@ -814,6 +818,15 @@ def merge_rollup(
             + json.dumps({"captured_at": entry["meta"].get("captured_at", ""), "key": match.group(1)}, separators=(",", ":"), sort_keys=True)
             + " -->"
         ), block)
+        block = re.sub(r"(?m)^来源：\[\[[^\n]+\]\](?:\s*·\s*\[[^\]]+\]\([^)]+\))?\n?", "", block)
+        block = re.sub(r"(?m)^评论：\s*\n?", "", block)
+        if "<!-- vault-capture:comment" in block and "批注：" not in block:
+            block = re.sub(
+                r"(?m)^(<!-- vault-capture:comment )",
+                r"批注：\n\n\1",
+                block,
+                count=1,
+            )
         region_parts.append(f"\n<!-- vault-capture:entry {meta_json} -->\n\n## 标注 {index}\n\n{block}\n")
     merged_body = prefix + "".join(region_parts) + suffix
     merged = f"---\n{frontmatter}\n---\n\n{merged_body.lstrip()}"
@@ -1100,8 +1113,8 @@ def job_source(vault: Path, job: dict[str, Any]) -> Path:
     return source
 
 
-def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> dict[str, Any]:
-    data = read_json_input(input_file)
+def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None, *, _data: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = _data if _data is not None else read_json_input(input_file)
     reject_unknown_fields(data, FINALIZE_FIELDS, "finalize")
     title = inline(str(data.get("title", "")))
     markdown = safe_user_text(str(data.get("markdown", "")))
@@ -1275,6 +1288,7 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None) -> 
             "ingest_status": "ready",
             "content_hash": updates["content_hash"],
             "paths_final": True,
+            "methods_attempted": list(data.get("methods_attempted") or []),
         }
 
 
@@ -1285,8 +1299,8 @@ def sanitize_error(value: Any) -> str:
     return text[:300] or "Unspecified ingest failure"
 
 
-def cmd_fail(vault: Path, source_id: str, input_file: str | None = None) -> dict[str, Any]:
-    data = read_json_input(input_file)
+def cmd_fail(vault: Path, source_id: str, input_file: str | None = None, *, _data: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = _data if _data is not None else read_json_input(input_file)
     status = str(data.get("status", "failed"))
     if status not in {"failed", "manual"}:
         raise CaptureError("fail status must be failed or manual", EXIT_INPUT)
@@ -1327,6 +1341,7 @@ def cmd_fail(vault: Path, source_id: str, input_file: str | None = None) -> dict
             "ingest_status": status,
             "error": error,
             "paths_final": False,
+            "methods_attempted": list(data.get("methods_attempted") or []),
         }
 
 
@@ -1399,6 +1414,73 @@ def resolve_vault(argument: str | None) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def cmd_ingest_web(vault: Path, source_id: str) -> dict[str, Any]:
+    if web_extract is None:
+        raise CaptureError(
+            "web_extract dependencies are not installed; run pip install -r requirements-web.txt",
+            EXIT_STORAGE,
+        )
+    # Read the job and handle the already-ready duplicate under the lock, then
+    # release before calling finalize/fail (each re-acquires the lock itself).
+    with capture_lock(vault):
+        job = read_job(vault, source_id)
+        if job.get("state") == "ready":
+            source = job_source(vault, job)
+            source_text = source.read_text(encoding="utf-8")
+            return {
+                "ok": True,
+                "result": "duplicate",
+                "id": source_id,
+                "source_path": relative(vault, source),
+                "staged": True,
+                "staged_paths": [],
+                "ingest_status": "ready",
+                "content_hash": get_field(source_text, "content_hash"),
+                "annotation_path": job.get("annotation_path"),
+                "asset_paths": job.get("asset_paths", []),
+                "paths_final": True,
+            }
+        url = str(job.get("url", "")).strip()
+    if not url:
+        raise CaptureError("Capture job has no URL", EXIT_INPUT)
+    profile_dir = os.environ.get("VAULT_CAPTURE_BROWSER_PROFILE", "") or None
+    allow_private = os.environ.get("VAULT_CAPTURE_ALLOW_PRIVATE_FETCH") == "1"
+    try:
+        result = web_extract.extract_article(url, profile_dir=profile_dir, allow_private_override=allow_private)
+    except web_extract.ExtractionError as exc:
+        status = exc.state if exc.state in ("failed", "manual") else "failed"
+        return cmd_fail(
+            vault, source_id,
+            _data={
+                "status": status,
+                "error": exc.reason,
+                "methods_attempted": list(exc.methods_attempted),
+            },
+        )
+    retrieved_at = dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+    finalize_data = {
+        "title": result.title,
+        "author": result.author,
+        "publisher": result.publisher,
+        "published": result.published,
+        "markdown": result.markdown,
+        "images": [{"token": img.token, "url": img.url} for img in result.images],
+        "images_complete": True,
+        "final_url": result.final_url or url,
+        "retrieved_at": retrieved_at,
+        "language": result.language,
+        "methods_attempted": list(result.methods_attempted),
+    }
+    try:
+        return cmd_finalize(vault, source_id, _data=finalize_data)
+    except CaptureError as exc:
+        if exc.code == EXIT_CONFLICT:
+            raise
+        sanitized = sanitize_error(str(exc))
+        return cmd_fail(vault, source_id, _data={"status": "failed", "error": sanitized})
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vault", help=argparse.SUPPRESS)
@@ -1416,6 +1498,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("id")
     retry = sub.add_parser("list-retryable")
     retry.add_argument("id", nargs="?")
+    ingest_web = sub.add_parser("ingest-web")
+    ingest_web.add_argument("id")
     return parser
 
 
@@ -1439,6 +1523,8 @@ def main() -> int:
             result = cmd_fail(vault, args.id, args.json_file)
         elif args.command == "inspect":
             result = cmd_inspect(vault, args.id)
+        elif args.command == "ingest-web":
+            result = cmd_ingest_web(vault, args.id)
         else:
             result = cmd_list_retryable(vault, args.id)
         emit(result)

@@ -42,7 +42,7 @@
 - 实现 URL 规范化和 `canonical_url` 去重。
 - 立即创建 Source 占位文件。
 - 建立后台抓取队列、重试和失败记录。
-- 普通网页转 Markdown。
+- 普通网页转 Markdown（仓库自有的确定性 `ingest-web`：Trafilatura + WeChat 适配 + Playwright 只读回退）。
 - 音视频生成带时间戳 transcript。
 - 每次自动化变更只暂存相关路径，由用户按批次生成可读 Git 提交。
 - 在临时 Vault 完成 `skills list/info/check`、RC 冒烟测试、稳定版晋级和回滚演练。

@@ -1,0 +1,55 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WeChat Article Title</title>
+</head>
+<body>
+<div id="img-content">
+<h1 id="activity-name" class="rich_media-title">WeChat Article Title</h1>
+<div class="rich_media_meta_list">
+<span class="rich_media_meta rich_media_meta_text">Author Name</span>
+<span id="profileBt">
+<a id="js_name" class="wx_tap_link">Account Name</a>
+</span>
+<em id="publish_time" class="rich_media_meta rich_media_meta_text">2026-07-20</em>
+</div>
+<div id="js_content" class="rich_media_content">
+<p>This is the first paragraph of the WeChat article body. It contains enough text to pass the minimum body length threshold and discusses topics relevant to knowledge capture and reliable article extraction for personal vaults.</p>
+<h2>Section One</h2>
+<p>A paragraph with <strong>bold emphasis</strong> and a <a href="https://example.com/link">hyperlink</a> for testing link preservation in the Markdown output from the WeChat adapter.</p>
+<p>
+<img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/bodyimage1/640?wx_fmt=jpeg" data-type="jpeg" data-w="640" data-h="480" alt="First body image">
+</p>
+<p>Content between images.</p>
+<section>
+<img data-original="https://mmbiz.qpic.cn/mmbiz_png/bodyimage2/640?wx_fmt=png" data-src="https://mmbiz.qpic.cn/mmbiz_png/bodyimage2/640?wx_fmt=png" data-w="640" data-h="360" alt="Second body image">
+</section>
+<blockquote><p>A quoted passage that should appear as a blockquote in the final Markdown rendering produced by the WeChat body extractor.</p></blockquote>
+<ul>
+<li>First bullet item</li>
+<li>Second bullet item</li>
+</ul>
+<p>
+<img src="https://mmbiz.qpic.cn/mmbiz_gif/spm_tracking/0?wx_fmt=gif" data-src="https://mmbiz.qpic.cn/mmbiz_gif/spm_tracking/0?wx_fmt=gif" data-w="1" data-h="1" alt="">
+</p>
+<p>
+<img data-src="https://mmbiz.qpic.cn/mmbiz_png/qrcode_abc/640?wx_fmt=png" data-w="200" data-h="200" alt="QR code">
+</p>
+<p>Final paragraph with sufficient body text to meet the extraction quality gate minimum character threshold for deterministic article capture.</p>
+</div>
+<div class="qr_code_pc">
+<img class="qrcode" src="https://mmbiz.qpic.cn/mmbiz_jpg/qr/440" alt="QR">
+</div>
+<div class="rich_media_tool">
+<img class="avatar" src="https://wx.qlogo.cn/avatar/132" alt="avatar">
+</div>
+<div id="js_comment_area" class="comment_area">
+<div class="comment_item">This is a comment that should be excluded.</div>
+</div>
+<div class="recommend_area">
+<a href="/s/other">Recommended article</a>
+</div>
+</div>
+</body>
+</html>

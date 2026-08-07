@@ -7,6 +7,7 @@
 ```text
 vault_capture.py [--vault PATH] preflight
 vault_capture.py [--vault PATH] stage [--json-file FILE]       # UTF-8 JSON file or stdin
+vault_capture.py [--vault PATH] ingest-web ID                  # deterministic web ingestion
 vault_capture.py [--vault PATH] finalize ID [--json-file FILE] # UTF-8 JSON file or stdin
 vault_capture.py [--vault PATH] fail ID [--json-file FILE]     # UTF-8 JSON file or stdin
 vault_capture.py [--vault PATH] inspect ID
@@ -100,6 +101,17 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 不得把原始 HTML、堆栈信息、Token、Cookie、Authorization Header 或主机绝对路径写入 `error`。
 
+## `ingest-web`
+
+`ingest-web ID` 是唯一新增的会改变状态的网页入口。它读取队列任务中的 URL（不使用调用方提供的替换 URL），使用仓库自有的确定性抓取运行时（详见 [web-runtime.md](web-runtime.md)）：
+
+- 静态抓取优先，WeChat 站点专用适配，不足时用只读 Playwright 渲染回退。
+- 完整读取响应，不静默截断；正文 Markdown 不经过 agent 或 chat 载荷。
+- 提取正文与元数据，生成 `vault-image://` token 图片清单，并直接复用既有原子 `finalize`/`fail` 事务完成最终命名、图片本地化与 Git 暂存。
+- 标题/元数据仅提取、正文过短、挑战页、不支持 content type、超限响应、Markdown 与图片清单不一致时，绝不进入 `ready`。
+
+输出与 `finalize` 成功一致：`ingest_status: ready`、最终 `source_path`/`annotation_path`/`asset_paths` 与 `paths_final: true`。验证码/登录/验证/限流/浏览器 profile 需要映射为 `manual`；超时/DNS/HTTP 5xx/暂时性错误保持 `failed` 可重试。
+
 ## Annotation 汇总
 
 捕获流程使用 `<!-- vault-capture:annotation-rollup -->` 标识其管理的汇总文件。没有该标记的人工 Annotation 文件不得合并或替换。汇总规则如下：
@@ -110,8 +122,12 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 - 同一引文出现新评论时追加评论，并保留旧评论；
 - 使用 `## 标注 1`、`## 标注 2` 顺序呈现引用单元；
 - 捕获时间、locator、评论时间和去重键只写入隐藏管理元数据，不在标题或评论正文中显示；
+- 汇总正文在 H1 标题下方恰好呈现一行 `来源：[[<source-id>|<来源标题>]] · [原文](<source-url>)`，不渲染 `## 摘录与批注`，也不在每个编号单元内重复来源行；
+- 只有该单元实际包含一条或多条用户批注时才呈现 `批注：` 及其列表；纯评论单元仍用 `批注：`，全文不出现面向用户的 `评论：`；
 - 有 locator 时只把它用于 Source 链接锚点；没有时不得输出“未定位”；
 - 根据全部单元聚合 `annotation_kind` 和 `engagement`。
+
+新创建的受管汇总使用上述布局。既有受管汇总只有在捕获追加/`finalize` 显式触达时才被归一化；不做全库或正式 Vault 迁移。
 
 ## 重试状态
 

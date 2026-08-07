@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Relative Images Article - Test Blog</title>
+<meta name="author" content="Test Author">
+<meta property="og:site_name" content="Test Blog">
+<meta name="date" content="2026-08-05">
+</head>
+<body>
+<article>
+<h1>Relative Images Article</h1>
+<p>This article contains relative and protocol-relative image URLs to verify that token rewriting normalizes them correctly against the base URL. The body has enough text to pass the minimum body length threshold for the deterministic extraction quality gate without any issues.</p>
+<h2>Images Section</h2>
+<p>A paragraph with a relative image <img src="/img/photo-1.jpg" alt="Relative Photo"> and a protocol-relative image <img src="//cdn.example.com/img/photo-2.jpg" alt="CDN Photo"> in the same section.</p>
+<p>Another paragraph with sufficient body text to ensure the quality gate passes after image token rewriting is complete and the manifest matches the markdown tokens exactly.</p>
+</article>
+</body>
+</html>

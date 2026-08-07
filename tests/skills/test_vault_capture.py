@@ -262,6 +262,110 @@ class VaultCaptureTests(unittest.TestCase):
         self.assertEqual(duplicate["result"], "duplicate")
         self.assertEqual(duplicate["staged_paths"], [])
 
+    def test_annotation_layout_quote_only_comment_only_and_mixed(self):
+        # Quote-only entry: no 批注： block, no per-entry source, no 评论：.
+        quote_only = self.run_cli(
+            "stage",
+            payload={
+                "kind": "web",
+                "url": "https://layout.example/quote",
+                "captured_at": "2026-08-04T14:00:00+08:00",
+                "annotations": [{"quote": "纯引文内容。", "locator": "第一节"}],
+            },
+        )
+        self.assertTrue(quote_only["staged"])
+        quote_text = (self.vault / quote_only["annotation_path"]).read_text(encoding="utf-8")
+        self.assertEqual(quote_text.count("<!-- vault-capture:entry "), 1)
+        self.assertIn("## 标注 1", quote_text)
+        self.assertIn("> 纯引文内容。", quote_text)
+        self.assertNotIn("批注：", quote_text)
+        self.assertNotIn("评论：", quote_text)
+        self.assertNotIn("## 摘录与批注", quote_text)
+        # Exactly one source line in the whole file (header only, no per-entry).
+        self.assertEqual(quote_text.count("来源：[[") + quote_text.count("[原文]"), 2)
+
+        # Comment-only entry: uses 批注：, no per-entry source line.
+        comment_only = self.run_cli(
+            "stage",
+            payload={
+                "kind": "web",
+                "url": "https://layout.example/comment",
+                "captured_at": "2026-08-04T14:05:00+08:00",
+                "annotations": [{"comment": "纯评论内容。", "locator": "第二节"}],
+            },
+        )
+        comment_text = (self.vault / comment_only["annotation_path"]).read_text(encoding="utf-8")
+        self.assertIn("## 标注 1", comment_text)
+        self.assertIn("批注：", comment_text)
+        self.assertIn("纯评论内容。", comment_text)
+        self.assertNotIn("评论：", comment_text)
+        self.assertNotIn("## 摘录与批注", comment_text)
+        self.assertNotIn("> 纯评论内容。", comment_text)
+
+        # Mixed: quote + annotation on same stage.
+        mixed = self.run_cli(
+            "stage",
+            payload={
+                "kind": "web",
+                "url": "https://layout.example/mixed",
+                "captured_at": "2026-08-04T14:10:00+08:00",
+                "annotations": [
+                    {"quote": "混合引文。", "comment": "混合批注。", "locator": "第三节"}
+                ],
+            },
+        )
+        mixed_text = (self.vault / mixed["annotation_path"]).read_text(encoding="utf-8")
+        self.assertIn("## 标注 1", mixed_text)
+        self.assertIn("> 混合引文。", mixed_text)
+        self.assertIn("批注：", mixed_text)
+        self.assertIn("混合批注。", mixed_text)
+        self.assertNotIn("评论：", mixed_text)
+        self.assertNotIn("## 摘录与批注", mixed_text)
+
+    def test_quote_only_then_comment_preserves_hidden_marker(self):
+        # F-03: appending a comment to an existing quote-only entry must not
+        # corrupt the hidden <!-- vault-capture:comment ... --> marker.
+        rollup = vault_capture.render_rollup(
+            "20260804-150000-note",
+            "20260804-150000-source",
+            "来源标题",
+            "https://example.com/article",
+            "20260804-150000-source",
+            "2026-08-04T15:00:00+08:00",
+            [],
+        )
+        # First: quote-only entry
+        rollup, added1, _kind, _eng = vault_capture.merge_rollup(
+            rollup,
+            [{"quote": "纯引文。", "comment": "", "locator": "第一节", "captured_at": "2026-08-04T15:00:00+08:00"}],
+            "20260804-150000-source",
+            "https://example.com/article",
+        )
+        self.assertEqual(added1, 1)
+        # Second: append a comment to the same quote
+        rollup, added2, _kind, _eng = vault_capture.merge_rollup(
+            rollup,
+            [{"quote": "纯引文。", "comment": "追加批注。", "locator": "第一节", "captured_at": "2026-08-04T15:05:00+08:00"}],
+            "20260804-150000-source",
+            "https://example.com/article",
+        )
+        self.assertEqual(added2, 1)
+        # No control characters (U+0001 corruption)
+        self.assertNotIn("\x01", rollup)
+        # Hidden comment marker must be intact
+        self.assertIn("<!-- vault-capture:comment", rollup)
+        # 批注： must be present (added by normalization)
+        self.assertIn("批注：", rollup)
+        self.assertIn("追加批注。", rollup)
+        # Re-merge must be stable (deduplication still works)
+        rollup2, added3, _kind, _eng = vault_capture.merge_rollup(
+            rollup,
+            [{"quote": "纯引文。", "comment": "追加批注。", "locator": "第一节", "captured_at": "2026-08-04T15:05:00+08:00"}],
+            "20260804-150000-source",
+            "https://example.com/article",
+        )
+        self.assertEqual(added3, 0)
+
     def test_legacy_rollup_is_normalized_when_explicitly_touched(self):
         rollup = vault_capture.render_rollup(
             "20260804-093000-note",
@@ -418,7 +522,12 @@ class VaultCaptureTests(unittest.TestCase):
         self.assertIn("图注文字。", source_text)
         annotation_text = (self.vault / finalized["annotation_path"]).read_text(encoding="utf-8")
         self.assertIn("## 标注 1", annotation_text)
-        self.assertIn(f"来源：[[{staged['id']}#第二节|带图片的文章]]", annotation_text)
+        self.assertIn(f"来源：[[{staged['id']}|带图片的文章]] · [原文]", annotation_text)
+        self.assertIn("批注：", annotation_text)
+        self.assertIn("我的评论。", annotation_text)
+        self.assertNotIn(f"来源：[[{staged['id']}#第二节|", annotation_text)
+        self.assertNotIn("评论：", annotation_text)
+        self.assertNotIn("## 摘录与批注", annotation_text)
         self.assertNotIn("未定位", annotation_text)
         self.assertNotRegex(annotation_text, r"(?m)^## 2026-")
         self.assertNotIn("- 2026-", annotation_text)
@@ -579,6 +688,72 @@ class VaultCaptureTests(unittest.TestCase):
         workflow = (REPO / "specifications/capture-workflow.md").read_text(encoding="utf-8")
         for required in ["Transcript 保留说话者", "Document 保留标题层级", "OCR 保留页序"]:
             self.assertIn(required, workflow)
+
+    def test_ingest_web_end_to_end_ready(self):
+        # AC-04: ingest-web reads the queued URL, extracts and finalizes without
+        # round-tripping article Markdown through an agent, and returns ready.
+        fixture = REPO / "tests/skills/fixtures/web/ingest_e2e.html"
+        html = fixture.read_bytes()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/article":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(html)))
+                    self.end_headers()
+                    self.wfile.write(html)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/article"
+            staged = self.run_cli(
+                "stage",
+                payload={
+                    "kind": "web",
+                    "url": url,
+                    "captured_at": "2026-08-07T09:00:00+08:00",
+                    "annotations": [],
+                },
+            )
+            self.assertTrue(staged["job_created"])
+            environment = os.environ.copy()
+            environment["VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS"] = "1"
+            environment["VAULT_CAPTURE_ALLOW_PRIVATE_FETCH"] = "1"
+            process = subprocess.run(
+                [sys.executable, str(SCRIPT), "--vault", str(self.vault), "ingest-web", staged["id"]],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
+            result = json.loads(process.stdout)
+            self.assertEqual(result["ingest_status"], "ready")
+            self.assertTrue(result["paths_final"])
+            source = self.vault / result["source_path"]
+            self.assertTrue(source.is_file())
+            text = source.read_text(encoding="utf-8")
+            self.assertIn("## Section A", text)
+            self.assertIn("> A quoted passage to verify blockquote preservation", text)
+            self.assertIn("```python", text)
+            self.assertIn("Item one", text)
+            self.assertIn("E2E Ingest Article", text)
+            inspected = self.run_cli("inspect", staged["id"])
+            self.assertEqual(inspected["job"]["state"], "ready")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":
