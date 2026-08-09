@@ -25,3 +25,6 @@ tests/skills/__pycache__/
 skills/vault-capture/scripts/__pycache__/
 .venv/
 __pycache__/
+
+# OpenCode harness run artifacts (never committed)
+tests/opencode-harness/out/
