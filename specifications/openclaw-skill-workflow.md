@@ -117,6 +117,25 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 
 登录态网页只允许通过显式配置的 Chrome extension `chrome` profile 读取。该 profile 可访问用户登录态，必须限制为打开、导航、快照和正文提取；不得由捕获工作流输入凭据、提交表单或执行账户写操作。sandboxed session 还必须显式设置 `sandbox.browser.allowHostControl: true` 并在 sandbox tool policy 中允许 browser；浏览器插件、profile 与权限均应在临时 Vault 冒烟测试中验证。
 
+### 4.1 网页抓取安全配置（可选，默认失败关闭）
+
+`vault-capture` 的网页抓取默认以最严格方式运行：要求 DNS 主机名且全部地址全局可路由，拒绝任何 IPv4/IPv6 字面量与私有/内网目标。**不需要任何环境变量即可正常工作**，切勿把可选 Fake-IP 配置放进 `requires.env` 使默认 skill 不可用。
+
+仅在 Clash/FlClash TUN Fake-IP 代理环境下，为让合法公网域名通过 `198.18.0.0/15` 的系统解析，可按需在测试 agent/Gateway 显式注入两个取值固定的环境变量：
+
+```text
+VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash
+VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google
+```
+
+两个变量必须**同时精确**设置才生效；缺失、部分或未知值一律失败关闭，绝不回落为私有访问。DoH provider 由代码固定为 Cloudflare 或 Google 的 HTTPS DNS JSON 端点，不接受任意 URL 或 HTTP；DoH 只用于复核真实 A/AAAA 是否全局可路由，不授权连接 Fake-IP 或任何私有真实地址。生产与测试必须配置隔离：测试只面向 basename 以 `-test` 结尾的 Vault 与独立 agent/Gateway，验证后恢复既有值并重载测试 Gateway，不回写正式配置。
+
+### 4.2 可选 Python 解释器
+
+`SKILL.md` 中每个 Python 命令统一使用带引号的回退变量 `"${VAULT_CAPTURE_PYTHON:-python3}"`。该变量由操作者在宿主配置或 SecretRef 中提供，只用于选择一个**已存在**的 Python 可执行文件；它不做 eval/拼接 shell、不安装依赖、不写入仓库、不放宽网络策略，也不放进 `requires.env`（未设置时默认回退 `python3`）。
+
+推荐把 `VAULT_CAPTURE_PYTHON` 指向一个已安装 `requirements-web.txt`/`requirements-web.lock` 的专用 venv 解释器（例如 `/path/to/vault-capture/venv/bin/python`，作为泛化占位符，不写入任何真实主机绝对路径）。配置前先在该解释器验证 `sys.executable` 与 `import trafilatura`/`import playwright`；变更或回滚后保持宿主值恢复。不要依赖 skill entry 的 `PATH` 注入去选中该解释器——应显式设置 `VAULT_CAPTURE_PYTHON`。
+
 ## 5. 优先级与副本管理
 
 OpenClaw 发生同名冲突时，workspace skill 的优先级高于 `extraDirs`。因此：

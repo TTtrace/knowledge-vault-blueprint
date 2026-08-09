@@ -7,7 +7,6 @@ import argparse
 import contextlib
 import datetime as dt
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -19,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -27,8 +27,10 @@ try:
     import web_extract
 except ImportError:
     web_extract = None  # type: ignore[assignment]
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+import network_security
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit, urljoin
+from urllib.request import Request, build_opener
 
 
 EXIT_INPUT = 2
@@ -251,19 +253,63 @@ def annotation_path_for(vault: Path, source_id: str, final_source_stem: str | No
     return vault_path(vault, f"notes/annotations/{stem}.md")
 
 
-def ensure_public_asset_url(url: str) -> None:
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
-        raise CaptureError("Image URL must be an absolute public HTTP(S) URL", EXIT_INPUT)
-    if os.environ.get("VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS") == "1":
-        return
+class _NoRedirectImageHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent urllib from following image redirects automatically.
+
+    Redirects are handled manually so each Location can be syntax/address
+    validated before a new connection is made.
+    """
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+    def http_error_303(self, req, fp, code, msg, headers):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+    def http_error_307(self, req, fp, code, msg, headers):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+    def http_error_308(self, req, fp, code, msg, headers):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+
+MAX_IMAGE_REDIRECTS = 5
+
+
+def _policy_for(policy):
+    """Resolve a caller-supplied policy or build one from the environment.
+
+    Build errors from the environment are translated to CaptureError so that no
+    NetworkPolicyError (or raw traceback) can escape the CLI on any path.
+    """
+    if policy is not None:
+        return policy
     try:
-        default_port = 443 if parts.scheme == "https" else 80
-        addresses = {item[4][0] for item in socket.getaddrinfo(parts.hostname, parts.port or default_port, type=socket.SOCK_STREAM)}
-    except OSError as exc:
-        raise CaptureError("Image host could not be resolved", EXIT_STORAGE) from exc
-    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-        raise CaptureError("Image URL resolves to a non-public address", EXIT_INPUT)
+        return network_security.NetworkPolicy.from_environment()
+    except network_security.NetworkPolicyError as exc:
+        raise CaptureError(exc.reason, EXIT_INPUT) from exc
+
+
+def _validate_web_url_syntax(url: str) -> None:
+    """Domain-only, network-free URL validation for stage/network boundaries.
+
+    Rejects non-HTTP(S), credentials, and IPv4/IPv6 literals with exit code 2.
+    """
+    try:
+        network_security.validate_domain_url_syntax(url)
+    except network_security.NetworkPolicyError as exc:
+        raise CaptureError(exc.reason, EXIT_INPUT) from exc
+
+
+def _validate_image_url(policy, url: str) -> None:
+    """Validate an image URL (and each redirect hop) via the shared policy."""
+    try:
+        policy.validate_url(url)
+    except network_security.NetworkPolicyError as exc:
+        raise CaptureError(exc.reason, EXIT_INPUT) from exc
 
 
 def download_image_assets(
@@ -272,7 +318,10 @@ def download_image_assets(
     markdown: str,
     raw_images: Any,
     source_url: str,
+    *,
+    policy=None,
 ) -> tuple[str, Path | None, list[tuple[Path, Path]]]:
+    policy = _policy_for(policy)
     if not isinstance(raw_images, list):
         raise CaptureError("images must be a list", EXIT_INPUT)
     images: list[dict[str, str]] = []
@@ -284,7 +333,7 @@ def download_image_assets(
         url = str(raw["url"]).strip()
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", token) or token in tokens:
             raise CaptureError("Image tokens must be unique safe identifiers", EXIT_INPUT)
-        ensure_public_asset_url(url)
+        _validate_image_url(policy, url)
         tokens.add(token)
         images.append({"token": token, "url": url})
     markdown_tokens = IMAGE_TOKEN_RE.findall(markdown)
@@ -299,21 +348,39 @@ def download_image_assets(
     moves: list[tuple[Path, Path]] = []
     total = 0
     rewritten = markdown
+    opener = build_opener(_NoRedirectImageHandler)
     try:
         for index, image in enumerate(images, start=1):
-            request = Request(
-                image["url"],
-                headers={"User-Agent": "vault-capture/1.0", "Referer": source_url},
-            )
-            try:
-                with urlopen(request, timeout=20) as response:
-                    ensure_public_asset_url(response.geturl())
-                    content_type = response.headers.get_content_type().lower()
-                    data = response.read(MAX_IMAGE_BYTES + 1)
-            except CaptureError:
-                raise
-            except Exception as exc:
-                raise CaptureError("Image download failed", EXIT_STORAGE) from exc
+            current_url = image["url"]
+            _validate_image_url(policy, current_url)
+            data = None
+            content_type = ""
+            for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
+                request = Request(
+                    current_url,
+                    headers={"User-Agent": "vault-capture/1.0", "Referer": source_url},
+                )
+                try:
+                    with opener.open(request, timeout=20) as response:
+                        content_type = response.headers.get_content_type().lower()
+                        data = response.read(MAX_IMAGE_BYTES + 1)
+                    break
+                except HTTPError as exc:
+                    if exc.code in (301, 302, 303, 307, 308):
+                        location = exc.headers.get("Location")
+                        if not location or redirect_count >= MAX_IMAGE_REDIRECTS:
+                            raise CaptureError("Image redirect limit exceeded", EXIT_INPUT) from exc
+                        current_url = urljoin(current_url, location)
+                        # Validate the redirect target before the next connection.
+                        _validate_image_url(policy, current_url)
+                        continue
+                    raise CaptureError("Image download failed", EXIT_STORAGE) from exc
+                except URLError as exc:
+                    raise CaptureError("Image download failed", EXIT_STORAGE) from exc
+                except (socket.timeout, TimeoutError) as exc:
+                    raise CaptureError("Image download timed out", EXIT_STORAGE) from exc
+            if data is None:
+                raise CaptureError("Image download failed", EXIT_STORAGE)
             if len(data) > MAX_IMAGE_BYTES:
                 raise CaptureError("An image exceeds the 20 MB limit", EXIT_INPUT)
             total += len(data)
@@ -912,6 +979,9 @@ def validate_stage(data: dict[str, Any]) -> dict[str, Any]:
     canonical_url = normalize_url(url) if url else ""
     if kind == "web" and not canonical_url:
         raise CaptureError("web capture requires a URL", EXIT_INPUT)
+    if kind == "web":
+        # Domain-only, network-free validation before any network activity.
+        _validate_web_url_syntax(url)
     text = safe_user_text(str(data.get("text", "")))
     if kind == "idea" and not text:
         raise CaptureError("idea capture requires text", EXIT_INPUT)
@@ -1113,7 +1183,7 @@ def job_source(vault: Path, job: dict[str, Any]) -> Path:
     return source
 
 
-def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None, *, _data: dict[str, Any] | None = None) -> dict[str, Any]:
+def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None, *, _data: dict[str, Any] | None = None, _policy=None) -> dict[str, Any]:
     data = _data if _data is not None else read_json_input(input_file)
     reject_unknown_fields(data, FINALIZE_FIELDS, "finalize")
     title = inline(str(data.get("title", "")))
@@ -1191,6 +1261,7 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None, *, 
                 markdown,
                 data.get("images", []),
                 source_url,
+                policy=_policy,
             )
             for _staged, destination in moves:
                 if destination.exists():
@@ -1444,9 +1515,17 @@ def cmd_ingest_web(vault: Path, source_id: str) -> dict[str, Any]:
     if not url:
         raise CaptureError("Capture job has no URL", EXIT_INPUT)
     profile_dir = os.environ.get("VAULT_CAPTURE_BROWSER_PROFILE", "") or None
-    allow_private = os.environ.get("VAULT_CAPTURE_ALLOW_PRIVATE_FETCH") == "1"
     try:
-        result = web_extract.extract_article(url, profile_dir=profile_dir, allow_private_override=allow_private)
+        policy = network_security.NetworkPolicy.from_environment()
+    except network_security.NetworkPolicyError as exc:
+        # Invalid/partial Fake-IP configuration fails closed with a short,
+        # non-sensitive error and preserves the staged Source.
+        return cmd_fail(
+            vault, source_id,
+            _data={"status": "failed", "error": exc.reason},
+        )
+    try:
+        result = web_extract.extract_article(url, profile_dir=profile_dir, policy=policy)
     except web_extract.ExtractionError as exc:
         status = exc.state if exc.state in ("failed", "manual") else "failed"
         return cmd_fail(
@@ -1472,7 +1551,7 @@ def cmd_ingest_web(vault: Path, source_id: str) -> dict[str, Any]:
         "methods_attempted": list(result.methods_attempted),
     }
     try:
-        return cmd_finalize(vault, source_id, _data=finalize_data)
+        return cmd_finalize(vault, source_id, _data=finalize_data, _policy=policy)
     except CaptureError as exc:
         if exc.code == EXIT_CONFLICT:
             raise
@@ -1534,6 +1613,12 @@ def main() -> int:
         payload.setdefault("staged", False)
         emit(payload)
         return exc.code
+    except network_security.NetworkPolicyError as exc:
+        # Defensive safety net: a network-policy error must never surface a raw
+        # traceback/environment/absolute path from the CLI. Emit a short safe
+        # error and fail closed.
+        emit({"ok": False, "error": exc.reason, "staged": False})
+        return EXIT_INPUT
     except OSError:
         emit({"ok": False, "error": "Filesystem operation failed", "staged": False})
         return EXIT_STORAGE

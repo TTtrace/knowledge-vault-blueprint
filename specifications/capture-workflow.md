@@ -117,6 +117,14 @@ flowchart TD
 - Annotation 中保存的引文是用户标注时看到的版本，refresh Source 正文时不得回写或覆盖这些引文。
 - 网页正文抓取通过仓库自有的确定性 `ingest-web` 命令完成：静态抓取优先，WeChat 站点专用适配，不足时用只读 Playwright 渲染回退；完整读取响应、提取正文与元数据、生成 `vault-image://` token 图片清单，并直接复用原子 `finalize`/`fail` 事务。正文 Markdown 不经过 agent 或 chat 载荷往返。详见 `skills/vault-capture/references/web-runtime.md`。
 
+### 6.1 网络与 SSRF 安全边界
+
+- 所有对外网络目标统一走共享策略 `network_security.py`。URL 必须是绝对 HTTP(S) 且使用 DNS 主机名；任何 IPv4/IPv6 字面量（含公网与 Fake-IP 字面量）在 `stage` 与每个网络边界被拒绝（退出码 2），不创建可抓取的 web 任务。
+- 默认模式要求系统解析的全部地址全局可路由。显式设置 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 与 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 后，系统返回 `198.18.0.0/15` 仅作为代理信号，通过固定信任的 DoH 独立查询 A/AAAA，全部全局才放行；配置缺失/部分/未知时失败关闭，不退回私有访问。
+- 初始页面、每次静态重定向、Playwright 文档/子资源/重定向请求、正文保留图片以及每次图片重定向，都必须在下一连接前通过同一策略校验；自动重定向被禁用，逐跳手动校验 Location。
+- SSRF 拒绝不得丢失已落盘 Source：抓取失败以简短安全 `failed` 记录保留 stub 与 URL，不输出原始 DNS 载荷、主机配置、凭据、堆栈或绝对路径。
+- 所有 Python 命令使用可选宿主解释器 `"${VAULT_CAPTURE_PYTHON:-python3}"`（带引号回退 `python3`）：只选择已有可执行文件，不 eval/拼接 shell、不安装依赖、不写入仓库、不放宽网络策略、不放进 `requires.env`。
+
 ## 7. Transcript
 
 Transcript 应：

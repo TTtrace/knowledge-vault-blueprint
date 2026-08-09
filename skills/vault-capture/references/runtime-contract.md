@@ -18,6 +18,8 @@ vault_capture.py [--vault PATH] list-retryable [ID]
 
 Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerShell 5 通过管道向原生进程传输内容时可能损坏非 ASCII 文本；仅在 Windows 开发测试中，将载荷写成 UTF-8 文件并改用 `--json-file FILE`。脚本不会删除调用方提供的输入文件。
 
+调用 Python 解释器使用可选 `VAULT_CAPTURE_PYTHON`（带引号回退 `"${VAULT_CAPTURE_PYTHON:-python3}"`）：它是操作者提供的已有可执行文件路径，不做 eval/拼接 shell、不装依赖、不写仓库、不放进 `requires.env`；未设置时回退 `python3`。
+
 ## `stage` 输入
 
 ```json
@@ -45,6 +47,8 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 ```
 
 `stage` 使用严格字段白名单；未知字段（包括已删除的 `why_saved`）返回退出码 `2`。`web` 必须提供 HTTP(S) URL；`idea` 必须提供 `text`。v1 会把 `transcript`、`document` 和 `ocr` 可靠保存为 `manual`，且不创建后台任务。每条 annotation 必须包含引文或评论。
+
+`web` URL 必须是 DNS 主机名：含凭据、非 HTTP(S)、或任何 IPv4/IPv6 字面量（含公网与 Fake-IP 字面量）在 `stage` 即返回退出码 `2`，不创建可抓取的 web 任务。`stage` 只做语法校验，不做 DNS；DNS/地址校验在每次网络边界由共享 SSRF 策略执行。
 
 缺少正式标题时，Source 仅使用 `<source-id>.md`，Annotation 仅使用 `annotated_<source-id>.md`。不得生成“待抓取”“待处理”或域名伪标题。提供可靠标题时可以直接使用最终命名；网页后台任务返回的路径仍视为临时路径，直到 `finalize` 成功。
 
@@ -85,7 +89,7 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 }
 ```
 
-每个 token 必须安全、唯一，并在 Markdown 中恰好出现一次；Markdown 中的占位符与 `images` 必须完全一致。脚本把图片写入 `assets/images/<source-id>/`，按正文顺序命名为 `<三位序号>-<内容哈希前12位>.<扩展名>`，再把占位符改为标准相对 Markdown 链接。允许 JPEG、PNG、WebP、GIF；单图上限 20 MB，单篇合计上限 100 MB。图片 URL 必须是公开 HTTP(S) 地址；任一图片失败时不得写入正文或设置 `ready`。
+每个 token 必须安全、唯一，并在 Markdown 中恰好出现一次；Markdown 中的占位符与 `images` 必须完全一致。脚本把图片写入 `assets/images/<source-id>/`，按正文顺序命名为 `<三位序号>-<内容哈希前12位>.<扩展名>`，再把占位符改为标准相对 Markdown 链接。允许 JPEG、PNG、WebP、GIF；单图上限 20 MB，单篇合计上限 100 MB。图片 URL 与每次图片重定向都必须在连接前通过共享 SSRF 策略，且必须使用 DNS 主机名（拒绝 IP 字面量）；任一图片失败时不得写入正文或设置 `ready`。
 
 完成后 Source 使用 `<作者>--<正式标题>--<captured日期>--<source-id>.md`，Annotation 使用 `annotated_<作者>--<正式标题>--<captured日期>--<source-id>.md`。作者按署名、publisher、域名、`未知作者` 的顺序回退。作者和标题文件名部分分别限制为 32 与 80 字符，frontmatter 保留完整值。脚本负责计算 `content_hash`；存在摘要时设置 `verification: unverified`；只有 Source、Annotation、图片和 Git 暂存全部成功后才把队列与 Source 改为 `ready`。输出返回最终 `source_path`、`annotation_path`、`asset_paths`、`staged_paths` 和 `paths_final: true`。
 
@@ -111,6 +115,8 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 - 标题/元数据仅提取、正文过短、挑战页、不支持 content type、超限响应、Markdown 与图片清单不一致时，绝不进入 `ready`。
 
 输出与 `finalize` 成功一致：`ingest_status: ready`、最终 `source_path`/`annotation_path`/`asset_paths` 与 `paths_final: true`。验证码/登录/验证/限流/浏览器 profile 需要映射为 `manual`；超时/DNS/HTTP 5xx/暂时性错误保持 `failed` 可重试。
+
+SSRF 安全配置为可选且默认失败关闭。只有同时设置 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 与 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 才启用 Fake-IP 感知；缺失/部分/未知的配置、DoH 超时/异常、或复核得到任一非全局地址，都映射为简短安全 `failed`（不泄露原始 DNS 载荷、主机配置、堆栈或绝对路径），并保留已落盘 Source 与 URL。生产代码不读取任何私有放行环境变量。
 
 ## Annotation 汇总
 

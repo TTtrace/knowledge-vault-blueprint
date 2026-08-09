@@ -26,13 +26,13 @@ metadata:
 3. 运行预检；失败时立即停止：
 
 ```bash
-python3 {baseDir}/scripts/vault_capture.py preflight
+"${VAULT_CAPTURE_PYTHON:-python3}" {baseDir}/scripts/vault_capture.py preflight
 ```
 
 4. 通过标准输入传入规范化 JSON。使用带单引号的 heredoc 分隔符，防止 Shell 执行用户文本：
 
 ```bash
-python3 {baseDir}/scripts/vault_capture.py stage <<'VAULT_CAPTURE_JSON'
+"${VAULT_CAPTURE_PYTHON:-python3}" {baseDir}/scripts/vault_capture.py stage <<'VAULT_CAPTURE_JSON'
 {"kind":"web","url":"https://example.com","annotations":[]}
 VAULT_CAPTURE_JSON
 ```
@@ -50,7 +50,7 @@ VAULT_CAPTURE_JSON
 3. `ready` 表示正文、图片清单、图片本地化、原子落盘与 Git 暂存全部成功。遇到验证码、登录、验证或限流时命令会返回 `manual`；遇到超时、网络错误、HTTP 失败、空正文、结构明显缺失或图片清单不完整时返回可重试的 `failed`。不要把「仅标题」或挑战页当作 `ready`。
 
 ```bash
-python3 {baseDir}/scripts/vault_capture.py ingest-web <id>
+"${VAULT_CAPTURE_PYTHON:-python3}" {baseDir}/scripts/vault_capture.py ingest-web <id>
 ```
 
 以上命令已经合并了抓取、校验、最终命名与图片本地化，且不会把正文经 agent 往返。若主机缺少网页运行时依赖，命令会安全停止并提示安装 `requirements-web.txt`。
@@ -61,12 +61,14 @@ python3 {baseDir}/scripts/vault_capture.py ingest-web <id>
 - 对 `/vault-capture retry all`，运行 `list-retryable`，并在 agent 配置的并发上限内，为每个返回任务启动一个隔离处理任务。
 - 用户询问状态时，运行 `inspect <id>`，不得修改文件。
 - `manual` 任务只有在用户解决阻塞并明确要求后才能重试。
+- 所有 Python 命令都使用可选解释器 `"${VAULT_CAPTURE_PYTHON:-python3}"`：未设置时回退到 `python3`。该变量是宿主提供的可执行文件路径，只用于选择已有 Python，不做 eval/拼接 shell，也不会安装依赖或放宽网络策略；不放进 `requires.env`（默认 skill 依旧可用）。测试/正式主机应把专用 venv 解释器通过该变量指向一个已安装 `requirements-web.txt` 的运行时。
 
 ## 不变量
 
 - 每个 Source 只维护一个由捕获流程管理的 Annotation 汇总文件，去重和聚合交给脚本处理。
 - 未知正式标题时只使用 ID 临时文件；不得生成“待抓取”“待处理”或域名伪标题。
 - 摘要不得进入 Source 原文区域；原文结构、正文附件或关键元数据不完整时不得标记为 `ready`。
+- 网页抓取默认最严格安全：URL 必须使用 DNS 主机名且全部解析地址全局可路由，拒绝 IP 字面量与私有/内网目标。Fake-IP 代理感知与 DoH 复核是**可选**配置（`VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` + `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 同时设置），不放进 `requires.env`，默认 skill 依旧可用；配置缺失/部分/未知时失败关闭，不降级为私有访问。详细边界见 [references/web-runtime.md](references/web-runtime.md)。
 - Transcript、Document 和 OCR 目前只可靠落盘为 `manual`；不要自行实现转写、解析或 OCR。未来处理器必须复用相同的临时命名、原文保真、附件完整性、原子落盘、Git 暂存和失败回滚契约。
 - 不得编辑 Source 受控标记之外的正文。
 - 不得自行提交或推送捕获文件；脚本只对本次涉及的路径执行 `git add`，由用户择机合并为易管理的提交。

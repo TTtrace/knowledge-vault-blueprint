@@ -37,7 +37,6 @@ EXPECTED_EXCERPTS = [
 
 def run_cli(vault: Path, command: str, *args: str, payload: dict | None = None) -> dict:
     env = os.environ.copy()
-    env["VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS"] = "1"
     process = subprocess.run(
         [sys.executable, str(SCRIPT), "--vault", str(vault), command, *args],
         input=json.dumps(payload, ensure_ascii=False) if payload is not None else None,

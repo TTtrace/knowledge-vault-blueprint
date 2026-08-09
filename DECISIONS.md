@@ -22,6 +22,22 @@
 | D-014 | 每个 Source 使用一个持续累积的捕获 Annotation 文件 | accepted |
 | D-015 | OpenClaw skill 候选版本先在 Linux 验证再晋级稳定版 | accepted |
 | D-016 | Vault 捕获自动化只暂存，不自动提交 | accepted |
+| D-018 | Fake-IP-aware SSRF 网络策略 | accepted |
+
+## D-018：Fake-IP-aware SSRF 网络策略
+
+**决定**：`vault-capture` 的所有对外网络目标统一走仓库自有的共享策略 `network_security.py`：URL 必须为绝对 HTTP(S) 且使用 DNS 主机名（拒绝任何 IPv4/IPv6 字面量，包括公网与 Fake-IP 字面量），每次连接前做地址级校验。默认模式要求系统解析结果全部为全局可路由地址。仅在 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 且 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` **同时**精确设置时启用 Clash 模式：此时系统返回 `198.18.0.0/15` 只被视为代理环境信号，通过固定信任的 HTTPS DNS-over-HTTPS 独立查询 A 与 AAAA，至少一个地址且全部全局可路由才放行。Fake-IP 绝不作为真实目标；DoH 超时/TLS/HTTP/DNS 非成功/畸形/超限/无地址/任一非全局均失败关闭。移除生产环境的 `VAULT_CAPTURE_ALLOW_PRIVATE_FETCH` 与 `VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS` 绕过，不引入等价私有放行。
+
+**理由**：
+
+- Clash/FlClash TUN Fake-IP 会把公网域名解析到 `198.18.0.0/15`，旧 `_is_public_host` 因此误拒合法公网文章；但直接放行该网段或加入主机/CIDR 白名单会破坏 SSRF。
+- 把 Fake-IP 仅当作“需要独立复核”的信号、再用固定可信 DoH 验证真实 A/AAAA 全公网，既兼容代理环境又不降低安全。
+- 所有对外面（初始页面、静态重定向、Playwright 文档/子资源/重定向、正文图片、图片重定向）复用同一策略，避免重复且不一致的 DNS 判定。
+- 测试夹具通过依赖注入 scoped fake policy/transport，不能由运行期环境变量启用，保证生产不引入宽泛私有放行。
+
+**边界**：`schema_version` 保持 `1`，无 Vault 迁移。DoH provider 端点固定于代码（Cloudflare/Google），不接受任意 URL 或 HTTP。错误文本不含原始 DNS 载荷、主机配置、堆栈或绝对路径。浏览器 profile/cookie 状态仍位于两仓库之外。每个 Python 命令使用可选宿主解释器 `VAULT_CAPTURE_PYTHON`（带引号回退 `python3`），只用于选择已有可执行文件，不装依赖、不写仓库、不放宽网络策略、不进 `requires.env`。
+
+**回滚**：将本任务允许路径回退到基线版本，恢复既有调用方，但不得把 `VAULT_CAPTURE_ALLOW_PRIVATE_FETCH` 作为操作绕过重新引入；若历史回滚必须恢复旧源码行，则保持该环境变量不设置并在文档说明该版本对 Fake-IP 仍不安全。无 schema/Vault 迁移，无需迁移数据。
 
 ## D-017：确定性网页抓取运行时与迁移边界
 

@@ -1,4 +1,9 @@
-"""Tests for web_extract: static fetch, WeChat adapter, Trafilatura, and fallback."""
+"""Tests for web_extract: static fetch, WeChat adapter, Trafilatura, and fallback.
+
+Localhost fixture tests use a scoped permissive fake policy injected through
+the ``policy`` parameter. This is a test-only injection and is never reachable
+through a production environment switch.
+"""
 
 from __future__ import annotations
 
@@ -15,16 +20,51 @@ import threading
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "skills" / "vault-capture" / "scripts" / "web_extract.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "web"
+
+if str(SCRIPT.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT.parent))
 
 SPEC = importlib.util.spec_from_file_location("web_extract", SCRIPT)
 assert SPEC and SPEC.loader
 web_extract = importlib.util.module_from_spec(SPEC)
 sys.modules["web_extract"] = web_extract
 SPEC.loader.exec_module(web_extract)
+
+import network_security  # noqa: E402
+
+
+class _PermissiveResult:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+class ScopedFixturePolicy:
+    """Test-only scoped policy permitting only the localhost fixture host.
+
+    It permits the loopback fixture host (bypassing the production IP-literal
+    rejection) but still rejects embedded credentials and any other target.
+    It is constructed only here and injected explicitly; production never
+    constructs or enables it via environment configuration.
+    """
+
+    def validate_url(self, url: str, *, force_refresh: bool = False) -> _PermissiveResult:
+        parts = urlsplit(url)
+        if parts.username or parts.password:
+            raise network_security.NetworkPolicyError("URLs with credentials are not allowed", recoverable=False)
+        if parts.hostname == "127.0.0.1":
+            return _PermissiveResult(url)
+        raise network_security.NetworkPolicyError("URL resolves to a non-public address", recoverable=False)
+
+    def validate_url_syntax(self, url: str) -> str:
+        return url
+
+
+PERMISSIVE = ScopedFixturePolicy()
 
 
 @contextlib.contextmanager
@@ -177,35 +217,31 @@ class WebExtractTests(unittest.TestCase):
     def test_static_fetch_redirect(self):
         with fixture_server({"article.html": "generic_article.html"}) as base:
             url = f"{base}/redirect"
-            final_url, content_type, html = web_extract.static_fetch(
-                url, allow_private_override=True
-            )
+            final_url, content_type, html = web_extract.static_fetch(url, policy=PERMISSIVE)
             self.assertEqual(content_type, "text/html")
             self.assertIn("Generic Article Title", html)
 
     def test_static_fetch_unsupported_content_type(self):
         with fixture_server({}) as base:
             with self.assertRaises(web_extract.ExtractionError) as ctx:
-                web_extract.static_fetch(f"{base}/non-html", allow_private_override=True)
+                web_extract.static_fetch(f"{base}/non-html", policy=PERMISSIVE)
             self.assertEqual(ctx.exception.state, "failed")
 
     def test_static_fetch_server_error(self):
         with fixture_server({}) as base:
             with self.assertRaises(web_extract.ExtractionError) as ctx:
-                web_extract.static_fetch(f"{base}/server-error", allow_private_override=True)
+                web_extract.static_fetch(f"{base}/server-error", policy=PERMISSIVE)
             self.assertEqual(ctx.exception.state, "failed")
 
     def test_static_fetch_rate_limit(self):
         with fixture_server({}) as base:
             with self.assertRaises(web_extract.ExtractionError) as ctx:
-                web_extract.static_fetch(f"{base}/ratelimit", allow_private_override=True)
+                web_extract.static_fetch(f"{base}/ratelimit", policy=PERMISSIVE)
             self.assertEqual(ctx.exception.state, "manual")
 
     def test_extract_article_generic_through_server(self):
         with fixture_server({"article.html": "generic_article.html"}) as base:
-            result = web_extract.extract_article(
-                f"{base}/article.html", allow_private_override=True
-            )
+            result = web_extract.extract_article(f"{base}/article.html", policy=PERMISSIVE)
             self.assertEqual(result.method, "trafilatura")
             self.assertEqual(result.title, "Generic Article Title")
             web_extract.quality_gate(result)
@@ -232,7 +268,7 @@ class WebExtractTests(unittest.TestCase):
         # but succeeds through the Playwright fallback.
         with fixture_server({"delayed.html": "delayed_render.html"}) as base:
             url = f"{base}/delayed.html"
-            result = web_extract.extract_article(url, allow_private_override=True)
+            result = web_extract.extract_article(url, policy=PERMISSIVE)
             self.assertEqual(result.method, "browser-trafilatura")
             self.assertEqual(result.title, "Delayed Render Title")
             self.assertIn("Delayed Render Title", result.markdown)
@@ -244,15 +280,11 @@ class WebExtractTests(unittest.TestCase):
         # F-08: methods_attempted must be observable so callers can prove
         # browser fallback actually ran before a manual/ready result.
         with fixture_server({"article.html": "generic_article.html"}) as base:
-            result = web_extract.extract_article(
-                f"{base}/article.html", allow_private_override=True
-            )
+            result = web_extract.extract_article(f"{base}/article.html", policy=PERMISSIVE)
             self.assertIn("static-fetch", result.methods_attempted)
             self.assertIn("trafilatura", result.methods_attempted)
         with fixture_server({"delayed.html": "delayed_render.html"}) as base:
-            result = web_extract.extract_article(
-                f"{base}/delayed.html", allow_private_override=True
-            )
+            result = web_extract.extract_article(f"{base}/delayed.html", policy=PERMISSIVE)
             self.assertIn("static-fetch", result.methods_attempted)
             self.assertIn("trafilatura", result.methods_attempted)
             self.assertIn("browser-trafilatura", result.methods_attempted)
@@ -262,18 +294,17 @@ class WebExtractTests(unittest.TestCase):
         # so callers can observe which methods ran before the failure.
         with fixture_server({}) as base:
             with self.assertRaises(web_extract.ExtractionError) as ctx:
-                web_extract.extract_article(
-                    f"{base}/server-error", allow_private_override=True
-                )
+                web_extract.extract_article(f"{base}/server-error", policy=PERMISSIVE)
             self.assertEqual(ctx.exception.state, "failed")
             self.assertIn("static-fetch", ctx.exception.methods_attempted)
 
     def test_static_fetch_rejects_redirect_to_credentials(self):
-        # F-01: redirect to a credentials-bearing URL must be rejected even
-        # with the private-test override active.
+        # F-01: redirect to a credentials-bearing URL must be rejected.
+        # The permissive policy still enforces the syntax-level credential
+        # rejection for redirect targets.
         with fixture_server({"a.html": "generic_article.html"}) as base:
             with self.assertRaises(web_extract.ExtractionError) as ctx:
-                web_extract.static_fetch(f"{base}/redirect-creds", allow_private_override=True)
+                web_extract.static_fetch(f"{base}/redirect-creds", policy=PERMISSIVE)
             self.assertEqual(ctx.exception.state, "failed")
 
     def test_relative_image_urls_token_rewrite(self):
@@ -337,7 +368,7 @@ class WebExtractTests(unittest.TestCase):
             with fixture_server({"delayed.html": "delayed_render.html"}) as base:
                 url = f"{base}/delayed.html"
                 final_url, html = web_extract.playwright_fetch(
-                    url, profile_dir=profile, allow_private_override=True
+                    url, profile_dir=profile, policy=PERMISSIVE
                 )
                 self.assertIn("Delayed Render Title", html)
                 # Persistent context creates Chromium profile data in the dir
@@ -355,7 +386,7 @@ class WebExtractTests(unittest.TestCase):
                     web_extract.playwright_fetch(
                         f"{base}/delayed.html",
                         profile_dir=profile,
-                        allow_private_override=True,
+                        policy=PERMISSIVE,
                     )
                 self.assertEqual(ctx.exception.state, "failed")
 
@@ -371,10 +402,20 @@ class WebExtractSecurityTests(unittest.TestCase):
         with self.assertRaises(web_extract.ExtractionError):
             web_extract._validate_url("https://user:token@example.com/")
 
+    def test_ip_literal_rejected_without_network(self):
+        # Direct public/Fake-IP literals are rejected by syntax without DNS.
+        for url in [
+            "https://93.184.216.34/",
+            "https://198.18.0.7/",
+            "https://[::1]/",
+        ]:
+            with self.assertRaises(web_extract.ExtractionError):
+                web_extract._validate_url(url)
+
     def test_redirect_revalidation(self):
-        # Redirect to a private address must be rejected in non-override mode
+        # Redirect to a private address must be rejected in non-override mode.
         with fixture_server({"a.html": "generic_article.html"}) as base:
-            # The server is on 127.0.0.1; private override is required for tests.
+            # The server is on 127.0.0.1; a default policy rejects the literal.
             with self.assertRaises(web_extract.ExtractionError):
                 web_extract._validate_url(f"{base}/a.html")
 
@@ -399,10 +440,13 @@ class FakeRoute:
 
 
 class NavigationGuardTests(unittest.TestCase):
+    def _default_guard(self):
+        return web_extract._make_navigation_guard(network_security.NetworkPolicy())
+
     def test_guard_aborts_private_subresource(self):
         # F-01: subresources (not just documents) must be validated. A fake
-        # private image request under the default no-override guard must abort.
-        guard = web_extract._make_navigation_guard(False)
+        # private image request under the default guard must abort.
+        guard = self._default_guard()
         route = FakeRoute("http://127.0.0.1/private.png", "image")
         guard(route)
         self.assertTrue(route.aborted)
@@ -410,25 +454,69 @@ class NavigationGuardTests(unittest.TestCase):
 
     def test_guard_aborts_private_document(self):
         # F-01: private document requests must still abort.
-        guard = web_extract._make_navigation_guard(False)
+        guard = self._default_guard()
         route = FakeRoute("http://127.0.0.1/", "document")
         guard(route)
         self.assertTrue(route.aborted)
         self.assertFalse(route.continued)
 
-    def test_guard_allows_private_with_override(self):
-        # F-01: the explicit private-test override must allow private requests.
-        guard = web_extract._make_navigation_guard(True)
+    def test_guard_allows_scoped_permissive_policy(self):
+        # Test-only injection: a scoped permissive policy lets fixture requests
+        # through. Not reachable through production environment configuration.
+        guard = web_extract._make_navigation_guard(PERMISSIVE)
         route = FakeRoute("http://127.0.0.1/private.png", "image")
         guard(route)
         self.assertFalse(route.aborted)
         self.assertTrue(route.continued)
+
+    def test_guard_allows_non_network_scheme_without_bypass(self):
+        # A non-HTTP(S) scheme (data:) does not open an external connection and
+        # continues; external HTTP(S) requests remain validated by the guard.
+        guard = self._default_guard()
+        route = FakeRoute("data:text/html,<b>hi</b>", "document")
+        guard(route)
+        self.assertFalse(route.aborted)
+        self.assertTrue(route.continued)
+
+    def test_guard_aborts_file_scheme(self):
+        # file: is not an approved local browser scheme; it must abort.
+        guard = self._default_guard()
+        route = FakeRoute("file:///etc/passwd", "document")
+        guard(route)
+        self.assertTrue(route.aborted)
+        self.assertFalse(route.continued)
+
+    def test_guard_allows_explicit_local_schemes(self):
+        # data/blob/about/chrome are the approved local browser schemes.
+        for scheme_url in [
+            "data:text/plain,abc",
+            "blob:https://example.com/uuid",
+            "about:blank",
+            "chrome://settings",
+        ]:
+            with self.subTest(url=scheme_url):
+                guard = self._default_guard()
+                route = FakeRoute(scheme_url, "document")
+                guard(route)
+                self.assertFalse(route.aborted, f"{scheme_url} should continue")
+                self.assertTrue(route.continued, f"{scheme_url} should continue")
+
+    def test_guard_aborts_other_scheme(self):
+        # An unapproved non-HTTP(S) scheme must abort.
+        guard = self._default_guard()
+        route = FakeRoute("ftp://example.com/x", "document")
+        guard(route)
+        self.assertTrue(route.aborted)
+        self.assertFalse(route.continued)
 
     def test_browser_manual_challenge_records_browser_method(self):
         # F-08: when the browser fallback raises a WeChat verification/rate-limit
         # manual challenge before returning a result, the error must record that
         # the browser was attempted so the smoke tool can accept the manual state.
         with mock.patch.object(
+            web_extract, "_validate_url",
+            side_effect=lambda url, policy=None: url,
+        ), mock.patch.object(
             web_extract, "static_fetch",
             side_effect=web_extract.ExtractionError("network down", state="failed"),
         ), mock.patch.object(
@@ -437,7 +525,7 @@ class NavigationGuardTests(unittest.TestCase):
         ):
             with self.assertRaises(web_extract.ExtractionError) as ctx:
                 web_extract.extract_article(
-                    "https://mp.weixin.qq.com/s/test", allow_private_override=True
+                    "https://mp.weixin.qq.com/s/test", policy=PERMISSIVE
                 )
             self.assertEqual(ctx.exception.state, "manual")
             self.assertIn("static-fetch", ctx.exception.methods_attempted)

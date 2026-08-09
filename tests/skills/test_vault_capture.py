@@ -13,6 +13,8 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
+from urllib.parse import urlsplit
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -22,9 +24,39 @@ assert SPEC and SPEC.loader
 vault_capture = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(vault_capture)
 
+# network_security is already imported by vault_capture into sys.modules.
+import network_security  # noqa: E402
+
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+class _ScopedResult:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+class ScopedFixturePolicy:
+    """Test-only policy permitting the loopback fixture host, rejecting credentials.
+
+    Injected only through in-process calls; never reachable via production
+    environment configuration.
+    """
+
+    def validate_url(self, url: str, *, force_refresh: bool = False) -> _ScopedResult:
+        parts = urlsplit(url)
+        if parts.username or parts.password:
+            raise network_security.NetworkPolicyError("URLs with credentials are not allowed", recoverable=False)
+        if parts.hostname == "127.0.0.1":
+            return _ScopedResult(url)
+        raise network_security.NetworkPolicyError("URL resolves to a non-public address", recoverable=False)
+
+    def validate_url_syntax(self, url: str) -> str:
+        return url
+
+
+SCOPED_POLICY = ScopedFixturePolicy()
 
 
 @contextlib.contextmanager
@@ -98,8 +130,6 @@ class VaultCaptureTests(unittest.TestCase):
         self.temp.cleanup()
 
     def run_cli(self, command: str, *args: str, payload=None, expected=0):
-        environment = os.environ.copy()
-        environment["VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS"] = "1"
         process = subprocess.run(
             [sys.executable, str(SCRIPT), "--vault", str(self.vault), command, *args],
             input=json.dumps(payload, ensure_ascii=False) if payload is not None else None,
@@ -108,7 +138,6 @@ class VaultCaptureTests(unittest.TestCase):
             errors="replace",
             capture_output=True,
             check=False,
-            env=environment,
         )
         self.assertEqual(process.returncode, expected, process.stderr + process.stdout)
         return json.loads(process.stdout)
@@ -140,6 +169,30 @@ class VaultCaptureTests(unittest.TestCase):
             vault_capture.normalize_url("https://user:secret@example.com/")
         with self.assertRaises(vault_capture.CaptureError):
             vault_capture.vault_path(self.vault, "../escape.md")
+
+    def test_stage_rejects_ip_literal_and_credentials(self):
+        for bad in [
+            "https://127.0.0.1/article",
+            "https://93.184.216.34/x",
+            "https://[::1]/x",
+            # legacy glibc/inet_aton numeric IPv4 forms
+            "https://0x5db8d822/article",
+            "https://2130706433/article",
+            "https://0301.0250.0330.042/article",
+            "https://93.184/article",
+        ]:
+            rejected = self.run_cli(
+                "stage",
+                payload={"kind": "web", "url": bad, "captured_at": "2026-08-04T09:30:00+08:00"},
+                expected=2,
+            )
+            self.assertFalse(rejected["ok"])
+        creds = self.run_cli(
+            "stage",
+            payload={"kind": "web", "url": "https://user:pass@example.com/x", "captured_at": "2026-08-04T09:30:00+08:00"},
+            expected=2,
+        )
+        self.assertFalse(creds["ok"])
 
     def test_staging_does_not_require_git_author_identity(self):
         git(self.vault, "config", "user.name", "")
@@ -480,6 +533,11 @@ class VaultCaptureTests(unittest.TestCase):
         self.assertEqual(repeated["staged_paths"], [])
         self.assertNotIn("不会覆盖", source.read_text(encoding="utf-8"))
 
+    def _finalize_in_process(self, staged, payload):
+        return vault_capture.cmd_finalize(
+            self.vault, staged["id"], _data=payload, _policy=SCOPED_POLICY
+        )
+
     def test_finalize_renames_rollup_and_localizes_images(self):
         staged = self.stage_web(
             annotations=[
@@ -492,10 +550,9 @@ class VaultCaptureTests(unittest.TestCase):
         )
         provisional_annotation = self.vault / staged["annotation_path"]
         with image_server() as server:
-            finalized = self.run_cli(
-                "finalize",
-                staged["id"],
-                payload={
+            finalized = self._finalize_in_process(
+                staged,
+                {
                     "title": "带图片的文章",
                     "author": [],
                     "publisher": "示例公众号",
@@ -540,22 +597,53 @@ class VaultCaptureTests(unittest.TestCase):
     def test_image_failure_does_not_mark_source_ready(self):
         staged = self.stage_web(annotations=[])
         with image_server() as server:
-            failed = self.run_cli(
-                "finalize",
-                staged["id"],
-                payload={
-                    "title": "损坏图片",
-                    "markdown": "![图片](vault-image://bad)",
-                    "images": [{"token": "bad", "url": f"{server}/not-image"}],
-                    "images_complete": True,
-                },
-                expected=2,
-            )
-        self.assertIn("unsupported", failed["error"].lower())
+            with self.assertRaises(vault_capture.CaptureError):
+                self._finalize_in_process(
+                    staged,
+                    {
+                        "title": "损坏图片",
+                        "markdown": "![图片](vault-image://bad)",
+                        "images": [{"token": "bad", "url": f"{server}/not-image"}],
+                        "images_complete": True,
+                    },
+                )
         source = self.vault / staged["source_path"]
         self.assertTrue(source.is_file())
         self.assertEqual(vault_capture.get_field(source.read_text(encoding="utf-8"), "ingest_status"), "pending")
         self.assertFalse((self.vault / "assets/images" / staged["id"]).exists())
+
+    def test_direct_finalize_invalid_network_env_no_traceback(self):
+        # A partial/invalid Fake-IP environment on a direct finalize must map to
+        # short safe CLI semantics (exit 2, no traceback/env/path leak) and not
+        # leave an uncaught InvalidNetworkConfig traceback.
+        staged = self.stage_web(annotations=[])
+        env = os.environ.copy()
+        env["VAULT_CAPTURE_SSRF_FAKE_IP_MODE"] = "clash"  # partial -> invalid
+        process = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", str(self.vault), "finalize", staged["id"]],
+            input=json.dumps(
+                {
+                    "title": "T",
+                    "markdown": "# T\n\nbody",
+                    "images": [],
+                    "images_complete": True,
+                }
+            ),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+        self.assertEqual(process.returncode, 2, process.stderr + process.stdout)
+        self.assertNotIn("Traceback", process.stderr + process.stdout)
+        out = json.loads(process.stdout)
+        self.assertFalse(out["ok"])
+        self.assertIn("Fake-IP SSRF configuration is invalid", out["error"])
+        # No absolute host path and no environment *value* leaks (config names
+        # in the short help text are expected and safe).
+        self.assertNotIn("/home", out["error"])
 
     def test_fail_retry_and_manual_explicit_retry(self):
         staged = self.stage_web(annotations=[])
@@ -689,9 +777,44 @@ class VaultCaptureTests(unittest.TestCase):
         for required in ["Transcript 保留说话者", "Document 保留标题层级", "OCR 保留页序"]:
             self.assertIn(required, workflow)
 
-    def test_ingest_web_end_to_end_ready(self):
-        # AC-04: ingest-web reads the queued URL, extracts and finalizes without
-        # round-tripping article Markdown through an agent, and returns ready.
+    def test_skill_python_commands_use_quoted_interpreter_fallback(self):
+        # Every vault-capture Python command in SKILL.md must use the quoted
+        # optional-interpreter fallback; VAULT_CAPTURE_PYTHON must not be
+        # required by requires.env.
+        skill = (REPO / "skills/vault-capture/SKILL.md").read_text(encoding="utf-8")
+        # No bare `python3 {baseDir}/scripts/vault_capture.py` invocation remains.
+        self.assertNotRegex(skill, r"(?m)^python3 \{baseDir\}/scripts/vault_capture\.py")
+        # The quoted fallback form is used.
+        self.assertIn('"${VAULT_CAPTURE_PYTHON:-python3}" {baseDir}/scripts/vault_capture.py', skill)
+        # requires.env does not list VAULT_CAPTURE_PYTHON (optional, not required).
+        self.assertNotIn("VAULT_CAPTURE_PYTHON\n", skill.split("env:")[1].split("---")[0])
+
+    def test_ingest_web_default_fake_ip_fails_preserves_source(self):
+        # Default mode: a system answer inside 198.18.0.0/15 must fail closed and
+        # the staged Source must be preserved (not lost, not marked ready).
+        staged = self.stage_web(url="https://fake.example/article", annotations=[])
+        policy = network_security.NetworkPolicy(
+            resolver=lambda host, port: {"198.18.0.7"}
+        )
+        with mock.patch.object(
+            network_security.NetworkPolicy,
+            "from_environment",
+            classmethod(lambda cls: policy),
+        ):
+            result = vault_capture.cmd_ingest_web(self.vault, staged["id"])
+        self.assertEqual(result["ingest_status"], "failed")
+        source = self.vault / staged["source_path"]
+        self.assertTrue(source.is_file())
+        self.assertEqual(
+            vault_capture.get_field(source.read_text(encoding="utf-8"), "ingest_status"),
+            "failed",
+        )
+        self.assertNotIn("198.18", result.get("error", ""))
+        self.assertNotIn("198.18", json.dumps(result))
+
+    def test_ingest_web_mocked_doh_fake_ip_reaches_ready(self):
+        # Explicit Clash mode with a fake resolver + fake DoH returning a public
+        # A/AAAA must reach ready and stage the Source/annotation/asset in Git.
         fixture = REPO / "tests/skills/fixtures/web/ingest_e2e.html"
         html = fixture.read_bytes()
 
@@ -713,7 +836,10 @@ class VaultCaptureTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            url = f"http://127.0.0.1:{server.server_port}/article"
+            # Use "localhost" (a DNS name) so stage's domain-only check passes;
+            # the injected resolver handles policy validation while the actual
+            # TCP connection resolves localhost to the loopback test server.
+            url = f"http://localhost:{server.server_port}/article"
             staged = self.run_cli(
                 "stage",
                 payload={
@@ -724,20 +850,19 @@ class VaultCaptureTests(unittest.TestCase):
                 },
             )
             self.assertTrue(staged["job_created"])
-            environment = os.environ.copy()
-            environment["VAULT_CAPTURE_ALLOW_PRIVATE_ASSETS"] = "1"
-            environment["VAULT_CAPTURE_ALLOW_PRIVATE_FETCH"] = "1"
-            process = subprocess.run(
-                [sys.executable, str(SCRIPT), "--vault", str(self.vault), "ingest-web", staged["id"]],
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                check=False,
-                env=environment,
+            # Fake resolver: Fake-IP for the fixture host; DoH returns public.
+            policy = network_security.NetworkPolicy(
+                mode=network_security.MODE_CLASH,
+                doh_provider="cloudflare",
+                resolver=lambda host, port: {"198.18.0.9"},
+                doh_transport=lambda host: {"93.184.216.34"},
             )
-            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
-            result = json.loads(process.stdout)
+            with mock.patch.object(
+                network_security.NetworkPolicy,
+                "from_environment",
+                classmethod(lambda cls: policy),
+            ):
+                result = vault_capture.cmd_ingest_web(self.vault, staged["id"])
             self.assertEqual(result["ingest_status"], "ready")
             self.assertTrue(result["paths_final"])
             source = self.vault / result["source_path"]
@@ -750,6 +875,9 @@ class VaultCaptureTests(unittest.TestCase):
             self.assertIn("E2E Ingest Article", text)
             inspected = self.run_cli("inspect", staged["id"])
             self.assertEqual(inspected["job"]["state"], "ready")
+            staged_paths = git(self.vault, "diff", "--cached", "--name-only").stdout.splitlines()
+            self.assertIn(result["source_path"], staged_paths)
+            self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
         finally:
             server.shutdown()
             server.server_close()

@@ -7,11 +7,11 @@ dedicated WeChat adapter and Playwright rendered-page fallback.
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
 import socket
 import ssl
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -20,6 +20,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request
+
+# Make the sibling shared policy importable when this file is executed directly
+# or loaded by tests via a module spec.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import network_security
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -113,34 +119,32 @@ class ExtractionResult:
     methods_attempted: list[str] = field(default_factory=list)
 
 
-def _is_public_host(hostname: str, port: int | None = None, scheme: str = "https") -> None:
-    if not hostname:
-        raise ExtractionError("URL has no hostname", state="failed", recoverable=False)
-    default_port = 443 if scheme == "https" else 80
+def _ensure_policy(policy) -> "network_security.NetworkPolicy":
+    """Resolve a caller-supplied policy or build one from the environment.
+
+    Tests may inject a scoped fake policy; production always builds from the
+    environment (which fails closed on invalid Fake-IP configuration).
+    """
+    if policy is not None:
+        return policy
+    return network_security.NetworkPolicy.from_environment()
+
+
+def _validate_url(url: str, *, policy=None) -> str:
+    """Validate a URL through the shared policy and return its URL form.
+
+    Raises ExtractionError (mapped from NetworkPolicyError) on failure.
+    """
+    return _run_policy(lambda p: p.validate_url(url), policy).url
+
+
+def _run_policy(action, policy=None):
+    """Run an action against a resolved policy, mapping failures to ExtractionError."""
+    resolved = _ensure_policy(policy)
     try:
-        infos = socket.getaddrinfo(hostname, port or default_port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise ExtractionError("Host could not be resolved", state="failed") from exc
-    addresses = {info[4][0] for info in infos}
-    if not addresses:
-        raise ExtractionError("Host could not be resolved", state="failed")
-    for addr in addresses:
-        ip = ipaddress.ip_address(addr)
-        if not ip.is_global:
-            raise ExtractionError("URL resolves to a non-public address", state="failed", recoverable=False)
-
-
-def _validate_url(url: str, *, allow_private: bool = False) -> str:
-    parts = urlsplit(url.strip())
-    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
-        raise ExtractionError("Only absolute HTTP(S) URLs are supported", state="failed", recoverable=False)
-    if parts.username or parts.password:
-        raise ExtractionError("URLs with credentials are not allowed", state="failed", recoverable=False)
-    if not allow_private:
-        host = parts.hostname.lower()
-        port = parts.port
-        _is_public_host(host, port, parts.scheme.lower())
-    return url.strip()
+        return action(resolved)
+    except network_security.NetworkPolicyError as exc:
+        raise ExtractionError(exc.reason, state="failed", recoverable=exc.recoverable) from exc
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -166,12 +170,12 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise HTTPError(req.full_url, code, msg, headers, fp)
 
 
-def static_fetch(url: str, *, allow_private_override: bool = False) -> tuple[str, str, str]:
+def static_fetch(url: str, *, policy=None) -> tuple[str, str, str]:
     """Fetch a URL via static HTTP with size/timeout/redirect limits.
 
     Returns (final_url, content_type, html_text).
     """
-    current_url = _validate_url(url, allow_private=allow_private_override)
+    current_url = _validate_url(url, policy=policy)
     opener = urllib.request.build_opener(_NoRedirectHandler)
     for redirect_count in range(MAX_REDIRECTS + 1):
         req = Request(
@@ -209,7 +213,8 @@ def static_fetch(url: str, *, allow_private_override: bool = False) -> tuple[str
                 if not location or redirect_count >= MAX_REDIRECTS:
                     raise ExtractionError("Too many redirects", state="failed") from exc
                 current_url = urljoin(current_url, location)
-                current_url = _validate_url(current_url, allow_private=allow_private_override)
+                # Validate the redirect target before the next connection.
+                current_url = _validate_url(current_url, policy=policy)
                 continue
             if 500 <= exc.code < 600:
                 raise ExtractionError(f"HTTP {exc.code}", state="failed") from exc
@@ -977,7 +982,7 @@ def _scroll_for_lazy_images(page: Any) -> None:
         pass
 
 
-def _make_navigation_guard(allow_private: bool):
+def _make_navigation_guard(policy=None):
     """Create a Playwright route handler that validates every request URL.
 
     Documents and subresources are both validated, so a public page whose
@@ -987,10 +992,28 @@ def _make_navigation_guard(allow_private: bool):
     """
     from playwright.sync_api import Route
 
+    # Explicitly required local browser schemes that do not open an external
+    # connection. Everything else non-HTTP(S) (including `file`) is aborted so
+    # the guard is deny-by-default at the policy layer.
+    LOCAL_SCHEMES = {"data", "blob", "about", "chrome"}
+
+    resolved = _ensure_policy(policy)
+
     def handler(route: Route) -> None:
+        url = route.request.url
         try:
-            _validate_url(route.request.url, allow_private=allow_private)
-        except ExtractionError:
+            parts = urlsplit(url)
+            scheme = parts.scheme.lower()
+            if scheme in {"http", "https"}:
+                resolved.validate_url(url)
+            elif scheme in LOCAL_SCHEMES:
+                # Local browser scheme: no external connection; allow explicitly.
+                pass
+            else:
+                # Unapproved non-HTTP(S) scheme (e.g. file:): abort.
+                route.abort()
+                return
+        except network_security.NetworkPolicyError:
             route.abort()
             return
         route.continue_()
@@ -1003,9 +1026,9 @@ def playwright_fetch(
     *,
     profile_dir: str | None = None,
     timeout_ms: int = 30000,
-    allow_private_override: bool = False,
+    policy=None,
 ) -> tuple[str, str]:
-    _validate_url(url, allow_private=allow_private_override)
+    _validate_url(url, policy=policy)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -1035,7 +1058,7 @@ def playwright_fetch(
 
     try:
         with sync_playwright() as p:
-            guard = _make_navigation_guard(allow_private_override)
+            guard = _make_navigation_guard(policy)
             if profile_dir:
                 context = p.chromium.launch_persistent_context(
                     profile_dir,
@@ -1066,6 +1089,9 @@ def playwright_fetch(
                 except Exception:
                     pass
                 final_url = page.url
+                # Re-validate the final document URL; never mark a page ready
+                # that resolved to an unsafe address.
+                _validate_url(final_url, policy=policy)
                 html = page.content()
             finally:
                 context.close()
@@ -1137,12 +1163,12 @@ def _try_playwright(
     *,
     wechat: bool,
     profile_dir: str | None,
-    allow_private_override: bool,
+    policy,
 ) -> ExtractionResult:
     final_url, html = playwright_fetch(
         url,
         profile_dir=profile_dir,
-        allow_private_override=allow_private_override,
+        policy=policy,
     )
     if wechat:
         challenge = _detect_wechat_challenge(html)
@@ -1170,7 +1196,7 @@ def _attempt_browser(
     url: str,
     wechat: bool,
     profile_dir: str | None,
-    allow_private_override: bool,
+    policy,
     methods: list[str],
 ) -> ExtractionResult:
     """Run the Playwright fallback, recording that the browser was attempted.
@@ -1184,7 +1210,7 @@ def _attempt_browser(
             url,
             wechat=wechat,
             profile_dir=profile_dir,
-            allow_private_override=allow_private_override,
+            policy=policy,
         )
         methods.append(result.method)
         quality_gate(result)
@@ -1199,7 +1225,7 @@ def extract_article(
     url: str,
     *,
     profile_dir: str | None = None,
-    allow_private_override: bool = False,
+    policy=None,
 ) -> ExtractionResult:
     """Extract an article from a URL.
 
@@ -1207,7 +1233,7 @@ def extract_article(
     Playwright fallback is used only when static extraction is insufficient.
     Methods attempted are recorded so callers can prove browser fallback ran.
     """
-    _validate_url(url, allow_private=allow_private_override)
+    _validate_url(url, policy=policy)
 
     wechat = is_wechat_url(url)
     final_url = url
@@ -1215,7 +1241,7 @@ def extract_article(
     methods: list[str] = []
 
     try:
-        final_url, _ct, static_html = static_fetch(url, allow_private_override=allow_private_override)
+        final_url, _ct, static_html = static_fetch(url, policy=policy)
         methods.append("static-fetch")
     except ExtractionError as exc:
         methods.append("static-fetch")
@@ -1223,7 +1249,7 @@ def extract_article(
             try:
                 return _attempt_browser(
                     url=url, wechat=True, profile_dir=profile_dir,
-                    allow_private_override=allow_private_override, methods=methods,
+                    policy=policy, methods=methods,
                 )
             except ExtractionError:
                 raise
@@ -1244,7 +1270,7 @@ def extract_article(
         try:
             return _attempt_browser(
                 url=final_url, wechat=True, profile_dir=profile_dir,
-                allow_private_override=allow_private_override, methods=methods,
+                policy=policy, methods=methods,
             )
         except ExtractionError:
             raise
@@ -1263,7 +1289,7 @@ def extract_article(
     try:
         return _attempt_browser(
             url=final_url, wechat=False, profile_dir=profile_dir,
-            allow_private_override=allow_private_override, methods=methods,
+            policy=policy, methods=methods,
         )
     except ExtractionError:
         raise
