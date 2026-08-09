@@ -68,7 +68,7 @@ VAULT_CAPTURE_JSON
 - 每个 Source 只维护一个由捕获流程管理的 Annotation 汇总文件，去重和聚合交给脚本处理。
 - 未知正式标题时只使用 ID 临时文件；不得生成“待抓取”“待处理”或域名伪标题。
 - 摘要不得进入 Source 原文区域；原文结构、正文附件或关键元数据不完整时不得标记为 `ready`。
-- 网页抓取默认最严格安全：URL 必须使用 DNS 主机名且全部解析地址全局可路由，拒绝 IP 字面量与私有/内网目标。Fake-IP 代理感知与 DoH 复核是**可选**配置（`VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` + `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 同时设置），不放进 `requires.env`，默认 skill 依旧可用；配置缺失/部分/未知时失败关闭，不降级为私有访问。详细边界见 [references/web-runtime.md](references/web-runtime.md)。
+- 网页抓取默认最严格安全：URL 必须使用 DNS 主机名且全部解析地址全局可路由或属于豁免的 `198.18.0.0/16`（该网段在默认与 Clash 模式都无条件放行且不触发 DoH，无需环境变量），拒绝 IP 字面量（含豁免网段字面量）与私有/内网目标。残余 `198.19.0.0/16` 的 Fake-IP 复核是**可选**配置（`VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` + `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 同时设置），不放进 `requires.env`，默认 skill 依旧可用；配置缺失/部分/未知时失败关闭，不降级为私有访问。详细边界见 [references/web-runtime.md](references/web-runtime.md)。
 - Transcript、Document 和 OCR 目前只可靠落盘为 `manual`；不要自行实现转写、解析或 OCR。未来处理器必须复用相同的临时命名、原文保真、附件完整性、原子落盘、Git 暂存和失败回滚契约。
 - 不得编辑 Source 受控标记之外的正文。
 - 不得自行提交或推送捕获文件；脚本只对本次涉及的路径执行 `git add`，由用户择机合并为易管理的提交。

@@ -116,7 +116,7 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 输出与 `finalize` 成功一致：`ingest_status: ready`、最终 `source_path`/`annotation_path`/`asset_paths` 与 `paths_final: true`。验证码/登录/验证/限流/浏览器 profile 需要映射为 `manual`；超时/DNS/HTTP 5xx/暂时性错误保持 `failed` 可重试。
 
-SSRF 安全配置为可选且默认失败关闭。只有同时设置 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 与 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 才启用 Fake-IP 感知；缺失/部分/未知的配置、DoH 超时/异常、或复核得到任一非全局地址，都映射为简短安全 `failed`（不泄露原始 DNS 载荷、主机配置、堆栈或绝对路径），并保留已落盘 Source 与 URL。生产代码不读取任何私有放行环境变量。
+SSRF 安全配置为可选且默认失败关闭。豁免的 `198.18.0.0/16`（`198.18.0.0`–`198.18.255.255`）在默认与 Clash 模式都无条件放行且不触发 DoH，无需任何环境变量；这是对可信本地代理的有意安全放松。只有同时设置 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 与 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 才启用对残余 `198.19.0.0/16` Fake-IP 的复核；缺失/部分/未知的配置、DoH 超时/异常、或复核得到任一非全局地址，都映射为简短安全 `failed`（不泄露原始 DNS 载荷、主机配置、堆栈或绝对路径），并保留已落盘 Source 与 URL。生产代码不读取任何私有放行环境变量。
 
 ## Annotation 汇总
 

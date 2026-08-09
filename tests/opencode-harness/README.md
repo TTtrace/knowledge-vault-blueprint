@@ -77,13 +77,13 @@ openclaw agent --agent notesvaulter --message "<消息>" --json
 - `terminal`：接受 `ready`/`failed`/`manual` 任一。
 - 默认 `ready`，**绝不允许 failed 通过**。
 
-> ⚠️ 网页抓取默认**最严格安全**：要求 DNS 主机名且全部系统解析地址全局可路由。因此当前 Clash Fake-IP 环境下，公网域名可能被解析进 `198.18.0.0/15` 而判为 `failed`——这是**默认预期的失败关闭**，不是需要绕过的缺陷。要在真实 `198.18.0.0/15` 系统解析下验证抓取可达 `ready`，必须在测试 agent/Gateway 显式启用 Fake-IP 感知（`VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` + `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google`，两者同时设置；详见 `specifications/openclaw-skill-workflow.md` 与 `skills/vault-capture/references/web-runtime.md`）。同时把 `VAULT_CAPTURE_PYTHON` 指向已安装 `requirements-web.lock` 的专用 venv 解释器，并先通过 agent 验证该解释器能 `import trafilatura`，确保**首次**抓取尝试即运行在有效运行时下（首次观察终态必须精确为 `ready`）。启用后使用唯一 RFC URL 运行：
+> ⚠️ 网页抓取默认**最严格安全**：要求 DNS 主机名且全部系统解析地址全局可路由，或属于豁免的 `198.18.0.0/16`（`198.18.0.0`–`198.18.255.255`）。自 D-019 起，豁免网段在**默认与 Clash 模式都无条件放行且不触发 DoH、无需任何环境变量**，因此真实 Clash Fake-IP 环境下公网域名被解析进 `198.18.0.0/16` 时可在**无 Fake-IP/DoH 两变量**的情况下验证抓取到达 `ready`。残余 `198.19.0.0/16` 及任何其它非全局地址仍判 `failed`（默认预期失败关闭）；仅当需要让解析进残余 `198.19.0.0/16` 的域名通过时，才必须在测试 agent/Gateway 显式启用 Fake-IP 感知（`VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` + `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google`，两者同时设置；详见 `specifications/openclaw-skill-workflow.md` 与 `skills/vault-capture/references/web-runtime.md`）。同时把 `VAULT_CAPTURE_PYTHON` 指向已安装 `requirements-web.lock` 的专用 venv 解释器，并先通过 agent 验证该解释器能 `import trafilatura`，确保**首次**抓取尝试即运行在有效运行时下（首次观察终态必须精确为 `ready`）。启用后使用唯一 RFC URL 运行：
 >
 > ```bash
-> ./tests/opencode-harness/capture_debug.sh web "收：https://www.rfc-editor.org/rfc/rfc9110.html?vault_capture_fake_ip_test=$stamp" --wait 180 --expect-status ready --assert --cleanup
+> ./tests/opencode-harness/capture_debug.sh web "收：https://www.rfc-editor.org/rfc/rfc9110.html?vault_capture_198_18_exempt=$stamp" --wait 180 --expect-status ready --assert --cleanup
 > ```
 >
-> 未启用 Fake-IP 感知时该 URL 会因 `198.18.0.0/15` 系统解析判 `failed`，此时若只想接受该终态可显式 `--expect-status failed`（只表示“确实判失败”，不代表成功抓取）。**最终验证以单一事实来源为准**：由验证者确认运行时确实观察到一个 `198.18.0.0/15` 系统解析、两变量精确生效、`VAULT_CAPTURE_PYTHON` 指向有效解释器，且**首次**精确终态为 `ready`。
+> 未启用 Fake-IP 感知时，解析进残余 `198.19.0.0/16`（或其它非全局地址）的 URL 会因 `198.19.0.0/16` 系统解析判 `failed`，此时若只想接受该终态可显式 `--expect-status failed`（只表示“确实判失败”，不代表成功抓取）。**最终验证以单一事实来源为准**：由验证者确认运行时确实观察到至少一个 `198.18.0.0/16` 系统解析、Fake-IP mode/provider 两变量在测试中**不存在**（证明豁免无需配置）、`VAULT_CAPTURE_PYTHON` 指向有效解释器，且**首次**精确终态为 `ready`。
 
 ### ID 来源与歧义安全
 

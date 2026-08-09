@@ -33,6 +33,9 @@ GLOBAL_AAAA = "2606:2800:220:1:248:1893:25c8:1946"
 PRIVATE_A = "10.0.0.5"
 LOOPBACK = "127.0.0.1"
 FAKE_IP_A = "198.18.0.7"
+EXEMPT_LO = "198.18.0.0"
+EXEMPT_HI = "198.18.255.255"
+RESIDUAL_A = "198.19.0.7"
 LINK_LOCAL = "169.254.1.1"
 RESERVED = "192.0.2.1"
 MALFORMED = "not-an-ip"
@@ -310,8 +313,46 @@ class DefaultModeTests(unittest.TestCase):
         self.assertEqual(result.url, "https://example.com/a")
         self.assertFalse(result.fake_ip_observed)
 
-    def test_default_fake_ip_fails(self):
-        policy = make_policy(resolver=lambda h, p: {FAKE_IP_A})
+    def test_default_exempt_passes(self):
+        # A system answer inside the exact exempt 198.18.0.0/16 must pass in
+        # default mode without DoH and report Fake-IP observed for the exempt
+        # range without claiming a provider.
+        seen = []
+
+        def doh(host):
+            seen.append(host)
+            return {GLOBAL_A}
+
+        for addr in (EXEMPT_LO, EXEMPT_HI):
+            with self.subTest(addr=addr):
+                policy = make_policy(
+                    resolver=lambda h, p: {addr},
+                    doh_transport=doh,
+                )
+                result = policy.validate_url("https://example.com/a")
+                self.assertTrue(result.fake_ip_observed)
+                self.assertIsNone(result.provider)
+        self.assertEqual(seen, [])
+
+    def test_default_global_and_exempt_passes(self):
+        policy = make_policy(resolver=lambda h, p: {GLOBAL_A, EXEMPT_HI})
+        result = policy.validate_url("https://example.com/a")
+        self.assertTrue(result.fake_ip_observed)
+        self.assertIsNone(result.provider)
+
+    def test_default_residual_fake_ip_fails(self):
+        # A residual 198.19.0.0/16 answer still fails closed in default mode.
+        policy = make_policy(resolver=lambda h, p: {RESIDUAL_A})
+        with self.assertRaises(ns.NetworkPolicyError):
+            policy.validate_url("https://example.com/a")
+
+    def test_default_exempt_plus_rfc1918_fails(self):
+        policy = make_policy(resolver=lambda h, p: {EXEMPT_LO, PRIVATE_A})
+        with self.assertRaises(ns.NetworkPolicyError):
+            policy.validate_url("https://example.com/a")
+
+    def test_default_malformed_fails(self):
+        policy = make_policy(resolver=lambda h, p: {MALFORMED})
         with self.assertRaises(ns.NetworkPolicyError):
             policy.validate_url("https://example.com/a")
 
@@ -373,7 +414,7 @@ class EnvironmentModeTests(unittest.TestCase):
 
 
 class ClashDoHTests(unittest.TestCase):
-    def test_fake_ip_triggers_doh_and_all_public_passes(self):
+    def test_residual_fake_ip_triggers_doh_and_all_public_passes(self):
         seen = []
 
         def doh(host):
@@ -383,13 +424,80 @@ class ClashDoHTests(unittest.TestCase):
         policy = make_policy(
             mode=ns.MODE_CLASH,
             provider="cloudflare",
-            resolver=lambda h, p: {FAKE_IP_A},
+            resolver=lambda h, p: {RESIDUAL_A},
             doh_transport=doh,
         )
         result = policy.validate_url("https://example.com/a")
         self.assertTrue(result.fake_ip_observed)
         self.assertEqual(result.provider, "cloudflare")
         self.assertEqual(seen, ["example.com"])
+
+    def test_clash_exempt_no_doh(self):
+        # In valid Clash mode an exempt 198.18.0.0/16 answer must pass without
+        # any DoH request and without naming a provider.
+        seen = []
+
+        def doh(host):
+            seen.append(host)
+            return {GLOBAL_A}
+
+        policy = make_policy(
+            mode=ns.MODE_CLASH,
+            provider="cloudflare",
+            resolver=lambda h, p: {EXEMPT_LO},
+            doh_transport=doh,
+        )
+        result = policy.validate_url("https://example.com/a")
+        self.assertTrue(result.fake_ip_observed)
+        self.assertIsNone(result.provider)
+        self.assertEqual(seen, [])
+
+    def test_clash_global_and_exempt_pass_no_doh(self):
+        seen = []
+
+        def doh(host):
+            seen.append(host)
+            return {GLOBAL_A}
+
+        policy = make_policy(
+            mode=ns.MODE_CLASH,
+            provider="cloudflare",
+            resolver=lambda h, p: {GLOBAL_A, EXEMPT_HI},
+            doh_transport=doh,
+        )
+        result = policy.validate_url("https://example.com/a")
+        self.assertTrue(result.fake_ip_observed)
+        self.assertIsNone(result.provider)
+        self.assertEqual(seen, [])
+
+    def test_clash_exempt_plus_rfc1918_fails(self):
+        policy = make_policy(
+            mode=ns.MODE_CLASH,
+            provider="cloudflare",
+            resolver=lambda h, p: {EXEMPT_LO, PRIVATE_A},
+            doh_transport=lambda h: {GLOBAL_A},
+        )
+        with self.assertRaises(ns.NetworkPolicyError):
+            policy.validate_url("https://example.com/a")
+
+    def test_clash_exempt_plus_residual_invokes_doh(self):
+        # A set containing exempt plus residual 198.19.0.0/16 still requires DoH.
+        seen = []
+
+        def doh(host):
+            seen.append(host)
+            return {GLOBAL_A}
+
+        policy = make_policy(
+            mode=ns.MODE_CLASH,
+            provider="google",
+            resolver=lambda h, p: {EXEMPT_LO, RESIDUAL_A},
+            doh_transport=doh,
+        )
+        result = policy.validate_url("https://example.com/a")
+        self.assertEqual(seen, ["example.com"])
+        self.assertTrue(result.fake_ip_observed)
+        self.assertEqual(result.provider, "google")
 
     def test_non_fake_system_answer_does_not_query_doh(self):
         seen = []
@@ -412,7 +520,7 @@ class ClashDoHTests(unittest.TestCase):
             policy = make_policy(
                 mode=ns.MODE_CLASH,
                 provider="cloudflare",
-                resolver=lambda h, p: {FAKE_IP_A},
+                resolver=lambda h, p: {RESIDUAL_A},
                 doh_transport=lambda h: {GLOBAL_A, bad},
             )
             with self.assertRaises(ns.NetworkPolicyError):
@@ -422,7 +530,7 @@ class ClashDoHTests(unittest.TestCase):
         policy = make_policy(
             mode=ns.MODE_CLASH,
             provider="cloudflare",
-            resolver=lambda h, p: {FAKE_IP_A},
+            resolver=lambda h, p: {RESIDUAL_A},
             doh_transport=lambda h: set(),
         )
         with self.assertRaises(ns.NetworkPolicyError):

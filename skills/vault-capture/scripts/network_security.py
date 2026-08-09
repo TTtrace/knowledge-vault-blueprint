@@ -6,15 +6,21 @@ classification, Fake-IP detection, trusted DoH resolution, and redirect
 validation so that every outbound target is checked before a connection is
 made. This module is intentionally self-contained and standard-library-only.
 
-Design rules (see SPEC 2026-08-09-vault-capture-fake-ip-ssrf):
+Design rules (see SPEC 2026-08-09-vault-capture-fake-ip-ssrf and D-019):
 
-- Default mode requires every system resolver answer to be globally routable.
-- Clash Fake-IP mode accepts a system answer inside ``198.18.0.0/15`` only as a
-  signal to resolve A and AAAA independently over a fixed, trusted HTTPS DoH
-  provider; at least one real address must exist and every returned address
-  must be globally routable.
+- Default mode requires every system resolver answer to be globally routable or
+  in the exact exempt ``198.18.0.0/16`` range. Exempt addresses pass without any
+  DoH request.
+- Clash Fake-IP mode: a system answer in ``198.19.0.0/16`` (the residual half of
+  the full ``198.18.0.0/15`` Fake-IP range) is treated only as a signal to
+  resolve A and AAAA independently over a fixed, trusted HTTPS DoH provider; at
+  least one real address must exist and every returned address must be globally
+  routable. Exempt ``198.18.0.0/16`` answers never trigger DoH, including when
+  combined with residual Fake-IP answers (which still require DoH).
 - Fake-IP is never treated as a real destination. Direct IPv4/IPv6 literals,
   including public and Fake-IP literals, are always rejected.
+- The exemption is address-classification-only and unconditional: it applies in
+  both default and Clash modes and requires no environment variable.
 - Production code must not read any private-fetch bypass environment variable.
   Local fixture tests inject scoped fake policies/transports directly and must
   not be reachable through runtime environment configuration.
@@ -35,6 +41,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 
 FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+# Exact canonical trust-exemption range (D-019): answers inside 198.18.0.0/16
+# pass unconditionally without DoH in both default and Clash modes. The full
+# 198.18.0.0/15 Fake-IP range above is retained to represent the residual
+# 198.19.0.0/16 half that still follows the D-018 Clash/DoH behavior.
+EXEMPT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
 
 MODE_DEFAULT = "default"
 MODE_CLASH = "clash"
@@ -203,29 +214,38 @@ def _system_resolve(host: str, port: int) -> set[str]:
 
 
 def _classify(address: str) -> str:
-    """Classify an address string as global / fake / non_global."""
+    """Classify an address as global / exempt / residual_fake / non_global."""
     try:
         ip = ipaddress.ip_address(address)
     except ValueError as exc:
         raise NetworkPolicyError("Host resolved to a malformed address") from exc
     if ip.is_global:
         return "global"
+    if ip in EXEMPT_NETWORK:
+        return "exempt"
     if ip in FAKE_IP_NETWORK:
-        return "fake"
+        # Residual 198.19.0.0/16 half of the full Fake-IP /15 range.
+        return "residual_fake"
     return "non_global"
 
 
-def _classify_all(addresses: set[str]) -> tuple[bool, bool]:
-    """Return (any_fake, any_non_global) across all addresses."""
-    any_fake = False
+def _classify_all(addresses: set[str]) -> tuple[bool, bool, bool, bool]:
+    """Return (any_global, any_exempt, any_residual, any_non_global)."""
+    any_global = False
+    any_exempt = False
+    any_residual = False
     any_non_global = False
     for addr in addresses:
         cls = _classify(addr)
-        if cls == "fake":
-            any_fake = True
-        elif cls == "non_global":
+        if cls == "global":
+            any_global = True
+        elif cls == "exempt":
+            any_exempt = True
+        elif cls == "residual_fake":
+            any_residual = True
+        else:
             any_non_global = True
-    return any_fake, any_non_global
+    return any_global, any_exempt, any_residual, any_non_global
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -403,26 +423,32 @@ class NetworkPolicy:
         if not addresses:
             raise NetworkPolicyError("Host could not be resolved")
 
-        if self.mode == MODE_DEFAULT:
-            if any(_classify(a) != "global" for a in addresses):
-                raise NetworkPolicyError("URL resolves to a non-public address", recoverable=False)
-            return ValidationResult(url=url)
+        _, any_exempt, any_residual, any_non_global = _classify_all(addresses)
 
-        # Clash mode: every system answer must be global or Fake-IP.
-        any_fake, any_non_global = _classify_all(addresses)
+        if self.mode == MODE_DEFAULT:
+            # Default: global and exact exempt 198.18.0.0/16 pass; any other
+            # non-global answer (including residual 198.19.0.0/16) fails closed.
+            if any_non_global or any_residual:
+                raise NetworkPolicyError("URL resolves to a non-public address", recoverable=False)
+            return ValidationResult(url=url, fake_ip_observed=any_exempt)
+
+        # Clash mode: no non-global answer outside the full Fake-IP /15 range.
         if any_non_global:
             raise NetworkPolicyError("URL resolves to a non-public address", recoverable=False)
-        if not any_fake:
-            return ValidationResult(url=url)
-
-        # Fake-IP observed: independently resolve real A and AAAA; all public.
-        real = self._resolve_doh(host)
-        for addr in real:
-            if _classify(addr) != "global":
-                raise NetworkPolicyError(
-                    "Resolved target is not globally routable", recoverable=False
-                )
-        return ValidationResult(url=url, fake_ip_observed=True, provider=self.doh_provider)
+        if any_residual:
+            # Residual 198.19.0.0/16 Fake-IP present: independently verify real
+            # A and AAAA via DoH; all returned addresses must be global.
+            real = self._resolve_doh(host)
+            for addr in real:
+                if _classify(addr) != "global":
+                    raise NetworkPolicyError(
+                        "Resolved target is not globally routable", recoverable=False
+                    )
+            return ValidationResult(url=url, fake_ip_observed=True, provider=self.doh_provider)
+        if any_exempt:
+            # Only global and/or exempt answers: pass without any DoH request.
+            return ValidationResult(url=url, fake_ip_observed=True)
+        return ValidationResult(url=url)
 
 
 _default_policy = None

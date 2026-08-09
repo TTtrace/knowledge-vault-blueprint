@@ -789,12 +789,12 @@ class VaultCaptureTests(unittest.TestCase):
         # requires.env does not list VAULT_CAPTURE_PYTHON (optional, not required).
         self.assertNotIn("VAULT_CAPTURE_PYTHON\n", skill.split("env:")[1].split("---")[0])
 
-    def test_ingest_web_default_fake_ip_fails_preserves_source(self):
-        # Default mode: a system answer inside 198.18.0.0/15 must fail closed and
+    def test_ingest_web_default_residual_fake_ip_fails_preserves_source(self):
+        # Default mode: a residual 198.19.0.0/16 system answer must fail closed and
         # the staged Source must be preserved (not lost, not marked ready).
         staged = self.stage_web(url="https://fake.example/article", annotations=[])
         policy = network_security.NetworkPolicy(
-            resolver=lambda host, port: {"198.18.0.7"}
+            resolver=lambda host, port: {"198.19.0.7"}
         )
         with mock.patch.object(
             network_security.NetworkPolicy,
@@ -809,12 +809,16 @@ class VaultCaptureTests(unittest.TestCase):
             vault_capture.get_field(source.read_text(encoding="utf-8"), "ingest_status"),
             "failed",
         )
-        self.assertNotIn("198.18", result.get("error", ""))
-        self.assertNotIn("198.18", json.dumps(result))
+        self.assertNotIn("198.19", result.get("error", ""))
+        self.assertNotIn("198.19", json.dumps(result))
 
-    def test_ingest_web_mocked_doh_fake_ip_reaches_ready(self):
-        # Explicit Clash mode with a fake resolver + fake DoH returning a public
-        # A/AAAA must reach ready and stage the Source/annotation/asset in Git.
+    def _ingest_web_ready(self, policy):
+        """Stage a web job and ingest it with the given injected policy, asserting the
+        target completes the atomic ready/naming/image/Git-staging transaction.
+
+        Returns (result, staged). Used to prove both the default-mode exempt path and
+        the explicit Clash residual-Fake-IP/DoH path reach ready.
+        """
         fixture = REPO / "tests/skills/fixtures/web/ingest_e2e.html"
         html = fixture.read_bytes()
 
@@ -850,13 +854,6 @@ class VaultCaptureTests(unittest.TestCase):
                 },
             )
             self.assertTrue(staged["job_created"])
-            # Fake resolver: Fake-IP for the fixture host; DoH returns public.
-            policy = network_security.NetworkPolicy(
-                mode=network_security.MODE_CLASH,
-                doh_provider="cloudflare",
-                resolver=lambda host, port: {"198.18.0.9"},
-                doh_transport=lambda host: {"93.184.216.34"},
-            )
             with mock.patch.object(
                 network_security.NetworkPolicy,
                 "from_environment",
@@ -878,10 +875,131 @@ class VaultCaptureTests(unittest.TestCase):
             staged_paths = git(self.vault, "diff", "--cached", "--name-only").stdout.splitlines()
             self.assertIn(result["source_path"], staged_paths)
             self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
+            return result, staged
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_ingest_web_mocked_doh_residual_fake_ip_reaches_ready(self):
+        # Explicit Clash mode with a fake resolver returning a residual 198.19.0.0/16
+        # Fake-IP plus a fake DoH returning a public A/AAAA reaches ready and stages
+        # the Source/annotation/asset in Git.
+        policy = network_security.NetworkPolicy(
+            mode=network_security.MODE_CLASH,
+            doh_provider="cloudflare",
+            resolver=lambda host, port: {"198.19.0.9"},
+            doh_transport=lambda host: {"93.184.216.34"},
+        )
+        self._ingest_web_ready(policy)
+
+    def test_ingest_web_default_exempt_reaches_ready(self):
+        # Default mode: an exempt 198.18.0.0/16 system answer passes without DoH and
+        # completes the existing atomic ready, naming, image, and Git-staging transaction.
+        policy = network_security.NetworkPolicy(
+            resolver=lambda host, port: {"198.18.0.9"}
+        )
+        self._ingest_web_ready(policy)
+
+    def test_ingest_web_propagates_ordered_diagnostics_to_queue_and_inspect(self):
+        # ingest-web -> queue job -> inspect must expose matching methods_attempted
+        # and attempt_diagnostics; Source frontmatter/body remain unchanged.
+        staged = self.stage_web(url="https://mp.weixin.qq.com/s/test", annotations=[])
+        diags = [
+            {"method": "static-fetch", "outcome": "ok", "reason_code": "ok", "message": "成功"},
+            {"method": "wechat-static", "outcome": "rejected", "reason_code": "body_empty", "message": "正文为空"},
+            {"method": "browser", "outcome": "manual", "reason_code": "verification_required", "message": "需要验证"},
+        ]
+        methods = ["static-fetch", "browser"]
+        exc = vault_capture.web_extract.ExtractionError(
+            "Verification required",
+            state="manual",
+            methods_attempted=methods,
+            attempt_diagnostics=diags,
+        )
+        policy = network_security.NetworkPolicy()
+        with mock.patch.object(
+            network_security.NetworkPolicy, "from_environment", classmethod(lambda cls: policy)
+        ), mock.patch.object(
+            vault_capture.web_extract, "extract_article", side_effect=exc
+        ):
+            result = vault_capture.cmd_ingest_web(self.vault, staged["id"])
+        self.assertEqual(result["ingest_status"], "manual")
+        self.assertEqual(result["methods_attempted"], methods)
+        self.assertEqual(result["attempt_diagnostics"], diags)
+        job = json.loads(
+            (self.vault / ".queue/vault-capture" / f"{staged['id']}.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(job["methods_attempted"], methods)
+        self.assertEqual(job["attempt_diagnostics"], diags)
+        inspected = self.run_cli("inspect", staged["id"])
+        self.assertEqual(inspected["job"]["methods_attempted"], methods)
+        self.assertEqual(inspected["job"]["attempt_diagnostics"], diags)
+        source = (self.vault / staged["source_path"]).read_text(encoding="utf-8")
+        self.assertEqual(vault_capture.get_field(source, "ingest_status"), "manual")
+        self.assertNotIn("attempt_diagnostics", source)
+        self.assertNotIn("methods_attempted", source)
+
+    def test_profile_path_absent_from_ingest_output_queue_and_source(self):
+        # The configured browser profile path must never appear in command output,
+        # the ignored queue job, or the Source file.
+        staged = self.stage_web(url="https://mp.weixin.qq.com/s/test", annotations=[])
+        profile = "/home/monottx/.local/share/vault-capture/wechat-browser-profile"
+        diags = [
+            {"method": "static-fetch", "outcome": "ok", "reason_code": "ok", "message": "成功"},
+            {"method": "browser", "outcome": "manual", "reason_code": "verification_required", "message": "需要验证"},
+        ]
+        exc = vault_capture.web_extract.ExtractionError(
+            "Verification required",
+            state="manual",
+            methods_attempted=["static-fetch", "browser"],
+            attempt_diagnostics=diags,
+        )
+        policy = network_security.NetworkPolicy()
+        with mock.patch.dict(os.environ, {"VAULT_CAPTURE_BROWSER_PROFILE": profile}), \
+             mock.patch.object(
+                 network_security.NetworkPolicy, "from_environment", classmethod(lambda cls: policy)
+             ), mock.patch.object(
+                 vault_capture.web_extract, "extract_article", side_effect=exc
+             ):
+            result = vault_capture.cmd_ingest_web(self.vault, staged["id"])
+        for blob in [
+            json.dumps(result, ensure_ascii=False),
+            (self.vault / ".queue/vault-capture" / f"{staged['id']}.json").read_text(encoding="utf-8"),
+            (self.vault / staged["source_path"]).read_text(encoding="utf-8"),
+        ]:
+            self.assertNotIn(profile, blob)
+
+    def test_sentinel_secret_absent_from_ingest_output_queue_and_source(self):
+        # Web extraction collapses unknown/raw exception text to fixed taxonomy
+        # reasons; the sentinel must never reach command output, queue, or Source.
+        staged = self.stage_web(url="https://mp.weixin.qq.com/s/test", annotations=[])
+        sentinel = "SENTINEL-SECRET-7731"
+        diags = [
+            {"method": "static-fetch", "outcome": "ok", "reason_code": "ok", "message": "成功"},
+            {"method": "browser", "outcome": "failed", "reason_code": "unknown_error", "message": "未知错误"},
+        ]
+        # Production reasons are fixed strings (never raw exception text).
+        exc = vault_capture.web_extract.ExtractionError(
+            "Browser render failed",
+            state="failed",
+            methods_attempted=["static-fetch", "browser"],
+            attempt_diagnostics=diags,
+        )
+        policy = network_security.NetworkPolicy()
+        with mock.patch.object(
+            network_security.NetworkPolicy, "from_environment", classmethod(lambda cls: policy)
+        ), mock.patch.object(
+            vault_capture.web_extract, "extract_article", side_effect=exc
+        ):
+            result = vault_capture.cmd_ingest_web(self.vault, staged["id"])
+        self.assertEqual(result["error"], "Browser render failed")
+        for blob in [
+            json.dumps(result, ensure_ascii=False),
+            (self.vault / ".queue/vault-capture" / f"{staged['id']}.json").read_text(encoding="utf-8"),
+            (self.vault / staged["source_path"]).read_text(encoding="utf-8"),
+        ]:
+            self.assertNotIn(sentinel, blob)
 
 
 if __name__ == "__main__":

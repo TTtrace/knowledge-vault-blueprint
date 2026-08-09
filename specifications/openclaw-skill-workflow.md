@@ -119,16 +119,16 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 
 ### 4.1 网页抓取安全配置（可选，默认失败关闭）
 
-`vault-capture` 的网页抓取默认以最严格方式运行：要求 DNS 主机名且全部地址全局可路由，拒绝任何 IPv4/IPv6 字面量与私有/内网目标。**不需要任何环境变量即可正常工作**，切勿把可选 Fake-IP 配置放进 `requires.env` 使默认 skill 不可用。
+`vault-capture` 的网页抓取默认以最严格方式运行：要求 DNS 主机名且全部地址全局可路由或属于豁免的 `198.18.0.0/16`（`198.18.0.0`–`198.18.255.255`，在默认与 Clash 模式都无条件放行且不触发 DoH，无需环境变量），拒绝任何 IPv4/IPv6 字面量（含豁免网段字面量）与私有/内网目标。**不需要任何环境变量即可正常工作**，切勿把可选 Fake-IP 配置放进 `requires.env` 使默认 skill 不可用。
 
-仅在 Clash/FlClash TUN Fake-IP 代理环境下，为让合法公网域名通过 `198.18.0.0/15` 的系统解析，可按需在测试 agent/Gateway 显式注入两个取值固定的环境变量：
+仅在 Clash/FlClash TUN Fake-IP 代理环境下，为让合法公网域名通过残余 `198.19.0.0/16`（完整 `198.18.0.0/15` Fake-IP 范围的另一半）的系统解析，可按需在测试 agent/Gateway 显式注入两个取值固定的环境变量：
 
 ```text
 VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash
 VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google
 ```
 
-两个变量必须**同时精确**设置才生效；缺失、部分或未知值一律失败关闭，绝不回落为私有访问。DoH provider 由代码固定为 Cloudflare 或 Google 的 HTTPS DNS JSON 端点，不接受任意 URL 或 HTTP；DoH 只用于复核真实 A/AAAA 是否全局可路由，不授权连接 Fake-IP 或任何私有真实地址。生产与测试必须配置隔离：测试只面向 basename 以 `-test` 结尾的 Vault 与独立 agent/Gateway，验证后恢复既有值并重载测试 Gateway，不回写正式配置。
+两个变量必须**同时精确**设置才生效；缺失、部分或未知值一律失败关闭，绝不回落为私有访问。DoH provider 由代码固定为 Cloudflare 或 Google 的 HTTPS DNS JSON 端点，不接受任意 URL 或 HTTP；DoH 只用于复核 `198.19.0.0/16` 残余 Fake-IP 背后的真实 A/AAAA 是否全局可路由，不授权连接任何私有真实地址，也**不适用于豁免的 `198.18.0.0/16`（该网段永不触发 DoH）**。生产与测试必须配置隔离：测试只面向 basename 以 `-test` 结尾的 Vault 与独立 agent/Gateway，验证后恢复既有值并重载测试 Gateway，不回写正式配置。
 
 ### 4.2 可选 Python 解释器
 

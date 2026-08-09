@@ -119,8 +119,8 @@ flowchart TD
 
 ### 6.1 网络与 SSRF 安全边界
 
-- 所有对外网络目标统一走共享策略 `network_security.py`。URL 必须是绝对 HTTP(S) 且使用 DNS 主机名；任何 IPv4/IPv6 字面量（含公网与 Fake-IP 字面量）在 `stage` 与每个网络边界被拒绝（退出码 2），不创建可抓取的 web 任务。
-- 默认模式要求系统解析的全部地址全局可路由。显式设置 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 与 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 后，系统返回 `198.18.0.0/15` 仅作为代理信号，通过固定信任的 DoH 独立查询 A/AAAA，全部全局才放行；配置缺失/部分/未知时失败关闭，不退回私有访问。
+- 所有对外网络目标统一走共享策略 `network_security.py`。URL 必须是绝对 HTTP(S) 且使用 DNS 主机名；任何 IPv4/IPv6 字面量（含公网与 Fake-IP 及豁免 `198.18.0.0/16` 字面量）在 `stage` 与每个网络边界被拒绝（退出码 2），不创建可抓取的 web 任务。
+- 默认模式要求系统解析的全部地址全局可路由或属于豁免的 `198.18.0.0/16`。豁免网段（`198.18.0.0`–`198.18.255.255`）在**默认与 Clash 模式都无条件放行且不触发 DoH**，无需环境变量；这是对可信本地代理的有意安全放松。残余 `198.19.0.0/16` 及任何其它非全局地址仍失败关闭；仅在显式设置 `VAULT_CAPTURE_SSRF_FAKE_IP_MODE=clash` 与 `VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google` 后，`198.19.0.0/16` 残余 Fake-IP 作为代理信号，通过固定信任的 DoH 独立查询 A/AAAA，全部全局才放行；配置缺失/部分/未知时失败关闭，不退回私有访问。豁免仅作用于 DNS 解析结果，不适用于 IP 字面量。
 - 初始页面、每次静态重定向、Playwright 文档/子资源/重定向请求、正文保留图片以及每次图片重定向，都必须在下一连接前通过同一策略校验；自动重定向被禁用，逐跳手动校验 Location。
 - SSRF 拒绝不得丢失已落盘 Source：抓取失败以简短安全 `failed` 记录保留 stub 与 URL，不输出原始 DNS 载荷、主机配置、凭据、堆栈或绝对路径。
 - 所有 Python 命令使用可选宿主解释器 `"${VAULT_CAPTURE_PYTHON:-python3}"`（带引号回退 `python3`）：只选择已有可执行文件，不 eval/拼接 shell、不安装依赖、不写入仓库、不放宽网络策略、不放进 `requires.env`。
