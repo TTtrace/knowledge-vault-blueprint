@@ -6,7 +6,7 @@
 
 - `knowledge-vault-blueprint` 保存规范、skill 实现与测试。
 - 正式 Vault 保持为独立仓库；skill 不包含真实笔记、设备路径或凭据。
-- 本仓库内所有知识库 skill 使用同一个仓库版本标签发布，避免 schema、文档和运行逻辑漂移。
+- 本仓库内所有知识库 skill 使用同一 commit 演进发布（个人单用户简化流程，见 [D-020](../DECISIONS.md)），避免 schema、文档和运行逻辑漂移。
 - 非知识库用途的 skill 只有在形成独立生命周期后，才考虑迁出本仓库。
 
 ## 2. 仓库布局
@@ -58,7 +58,7 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 
 ## 4. 家庭主机加载方式
 
-家庭主机将本仓库的稳定版本检出到固定但不入库的路径，并在 `~/.openclaw/openclaw.json` 中通过 `skills.load.extraDirs` 直接加载：
+家庭主机将本仓库在 `main` 上的指定 commit 检出到固定但不入库的路径，并在 `~/.openclaw/openclaw.json` 中通过 `skills.load.extraDirs` 直接加载：
 
 ```json5
 {
@@ -136,6 +136,10 @@ VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google
 
 推荐把 `VAULT_CAPTURE_PYTHON` 指向一个已安装 `requirements-web.txt`/`requirements-web.lock` 的专用 venv 解释器（例如 `/path/to/vault-capture/venv/bin/python`，作为泛化占位符，不写入任何真实主机绝对路径）。配置前先在该解释器验证 `sys.executable` 与 `import trafilatura`/`import playwright`；变更或回滚后保持宿主值恢复。不要依赖 skill entry 的 `PATH` 注入去选中该解释器——应显式设置 `VAULT_CAPTURE_PYTHON`。
 
+### 4.3 微信抓取的 manual 边界
+
+`vault-capture` 抓取微信文章遇到验证、验证码、登录要求或限流时，一律**安全结束为 `manual`**，交由用户人工处理；当前规范**不使用** `VAULT_CAPTURE_BROWSER_PROFILE` 环境键，**不创建**专用 persistent profile，也**不以任何方式技术绕过**验证、登录或限流。本边界只约束 `vault-capture` 的微信自动抓取，不替代上文通用登录态浏览器的安全说明（该通用说明仅适用于确有用户显式登录态、属手动范畴的场景，不构成对微信自动抓取的 profile 授权）。
+
 ## 5. 优先级与副本管理
 
 OpenClaw 发生同名冲突时，workspace skill 的优先级高于 `extraDirs`。因此：
@@ -161,48 +165,31 @@ OpenClaw 发生同名冲突时，workspace skill 的优先级高于 `extraDirs`�
 
 ## 7. 发布、部署与回滚
 
-本仓库使用功能分支传递开发快照，使用 RC 标签标识待 Linux 验证的候选，使用 `main` 与正式语义版本标签标识稳定发布：
+个人单用户采用 `main + commit hash + last_known_good` 简化流程，不再强制 RC 标签、正式语义版本标签或 staging/production 双蓝图 checkout（见 [D-020](../DECISIONS.md)）。
 
-| Git 状态 | 含义 |
+| 标识 | 含义 |
 |---|---|
-| `skill/<name>` 功能分支 | 开发中；允许提交和推送尚未完成 Linux 验证的快照 |
-| `vX.Y.Z-rc.N` | 已通过开发机检查、等待 Linux staging 验证的不可变候选 |
-| `main` | 只接收已通过 Linux 验证的候选 commit |
-| `vX.Y.Z` | production 可以检出的稳定版本 |
+| `main` 上的 commit | 版本身份；可精确复现 |
+| 外部 `last_known_good` | 最近一次通过 Linux 验证的稳定 commit，供回退恢复 |
 
-采用本规范时，如果共享 `main` 已含未经过 Linux 验证的提交，不执行 force-push 或历史重写。将这些提交视为尚未发布的过渡候选，不创建正式标签；从当前提交形成新的 RC，在 Linux 验证完整候选文件树。首个验证通过的正式标签建立稳定基线，此后 `main` 才严格维持上表语义。
+同一 checkout 在维护模式下完成更新与验证后供 production 加载。**同一 checkout 不得同时为测试和 production 加载不同版本**；更新时先暂停 production（维护模式），验证通过后再恢复。
 
-发布顺序：
+发布顺序（个人单用户简化版）：
 
-1. 在功能分支同步修改规范、实现和测试；WIP commit 可以推送，但不得称为稳定版本。
-2. 在开发机完成历史整理、静态检查和基础测试，然后冻结候选 commit。
-3. 为候选创建 RC 标签，例如 `v0.2.0-rc.1`，并推送功能分支和标签。
-4. Linux staging 获取标签，以 detached HEAD 检出该精确候选，不直接测试会继续移动的开发分支。
-5. 运行：
+1. 在 `main` 上同步修改规范、实现和测试；提交为可复现 commit（记录 commit hash）。
+2. 进入维护模式：先确认无运行中/排队中的 Vault capture 任务。
+3. 在同一 checkout 上更新并验证：
+   - `openclaw config validate`
+   - `openclaw skills list --eligible --agent <vault-agent-id>`
+   - `openclaw skills info <skill-name> --agent <vault-agent-id>`
+   - `openclaw skills check --agent <vault-agent-id>`
+4. 运行单元测试（`python tests/skills/test_vault_capture.py`）。
+5. 开启新会话，在一次性、basename 以 `-test` 结尾的临时 Vault 执行真实 NotesVaulter E2E 冒烟测试（不写正式 Vault）。
+6. 若验证失败：恢复配置，在 `main` 上创建新的修复 commit 或 `git revert`，记录新的 `last_known_good`；不得改写已验证 commit。
+7. 若验证通过：将 `last_known_good` 指向该 commit，恢复 production 配置，开启新会话验证。
+8. production 加载该 commit 的 skill；出现问题时回退到上一个 `last_known_good` commit，重新运行检查并开启新会话。
 
-```text
-openclaw skills list --eligible --agent <vault-agent-id>
-openclaw skills info <skill-name> --agent <vault-agent-id>
-openclaw skills check --agent <vault-agent-id>
-```
-
-6. 开启 staging 新会话，在临时 Vault 执行冒烟测试。
-7. 若失败，在功能分支创建修复 commit 和下一个 RC 标签；不得移动或覆盖旧 RC。
-8. 若通过，将同一候选 commit fast-forward 晋级到 `main`，并在该 commit 创建正式标签，例如 `v0.2.0`。
-9. production 只检出正式标签；出现问题时检出上一稳定标签，重新运行检查并开启新会话。
-
-Linux 同时承担验证和正式运行时，使用两个独立检出目录：
-
-```text
-<blueprint-staging>       # 检出 RC 标签，只连接测试 Vault
-<blueprint-production>    # 检出正式标签，只连接正式 Vault
-```
-
-同一个 OpenClaw 配置不得同时把这两个目录加入 `extraDirs`，否则会发现同名 skill。需要 staging 与 production 同时运行时，使用不同 OpenClaw named profile，并隔离配置、状态目录、agent workspace 和 Gateway 端口。尚未投入 production 时，只建立 staging 环境即可。
-
-Linux 验证通过之后，不得对候选 commit 执行 amend、rebase、squash 或其他历史改写。若 `main` 无法 fast-forward，或合并结果改变了候选 commit/文件树，必须对最终候选重新打 RC 并重新验证。
-
-`watch: true` 可以在 `SKILL.md` 变化后刷新 skill 快照，但涉及脚本、reference、allowlist 或运行配置的发布仍以新会话验证为准。
+更新后必须以新会话验证为准；`watch: true` 可在 `SKILL.md` 变化后刷新 skill 快照，但脚本、reference、allowlist 或运行配置仍以新会话验证为准。
 
 若版本改变既有笔记含义，必须同时：
 
@@ -212,6 +199,8 @@ Linux 验证通过之后，不得对候选 commit 执行 amend、rebase、squash
 4. 在样本副本或测试分支中验证。
 5. 不静默覆盖 Source 正文、Yanki `noteId` 或未知属性。
 
+长期浸泡（一周或更长）允许在正式环境运行候选版本；失败时先保护当前 Vault，再以新代码提交回退软件，正式 Vault 数据时间线单调保留，不删除浸泡期新增捕获/手写/附件。详见 [升级规范](upgrade-workflow.md)。
+
 ## 8. 发布检查表
 
 - 每个 skill 的目录名、`name` 和 allowlist 项完全一致。
@@ -220,10 +209,9 @@ Linux 验证通过之后，不得对候选 commit 执行 amend、rebase、squash
 - `openclaw skills list/info/check` 均显示预期来源和 eligible 状态。
 - 目标 agent 只能看到 allowlist 中的 skill；其他 agent 不会意外继承。
 - 不存在 workspace 同名副本遮盖 `extraDirs` 版本。
-- RC 标签不可变，Linux 验证记录指向明确的 commit hash。
-- `main` 与正式标签指向已验证的同一 commit；验证后没有发生历史改写。
-- staging 与 production 不在同一配置中加载两份同名 skill。
-- 临时 Vault 冒烟测试、版本升级和上一标签回滚均通过。
+- `last_known_good` 记录指向明确的 commit hash；验证后未发生历史改写。
+- 同一 checkout 不在测试与 production 同时加载不同版本；更新时先进入维护模式。
+- 临时 Vault 冒烟测试、版本升级和 `last_known_good` 回退演练均通过。
 - 仓库中不存在 API Key、Token、Cookie、真实主机路径或正式 Vault 数据。
 
 ## 9. 官方参考

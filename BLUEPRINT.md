@@ -13,6 +13,34 @@
 - 记录允许 AI 访问的日记和专题日志。
 - 使用 Git 获取可审计、可回退的版本历史。
 
+### 1.1 输入与输出全景
+
+除内容类型、参与深度与生命周期三条轴线外，这套系统还可以从「输入 → 输出」的角度理解：输入被捕获、组织并长期保存，输出则把这些资产以不同形态重新交付给使用者。以下视图是对现有轴线的**补充**，不替代它们；每类输入仍由既有 `type`、目录与生命周期承载。
+
+状态图例：**已支持** = 当前对象/目录可直接承载；**部分** = 由既有对象承载但能力不完整；**规划** = 明确列为未来候选，未在当前 schema/目录中激活。
+
+| 输入 | 当前对象 / 目录 | 未来候选 | 状态 |
+|---|---|---|---|
+| 收集的网页文章，及音视频 transcript 与划线/批注 | `source`（`sources/web/`、`sources/transcripts/`）+ `annotation`（`notes/annotations/`） | — | 已支持 |
+| 想法、灵感，及问答迭代 | `idea`（`notes/ideas/`） | 问答为候选 `type: idea` + `kind: QA`（一个问答一个 note，答案在 note 内迭代，仅成熟答案可日后抽成独立 Idea） | 部分 |
+| 每日/时间/运动/睡眠记录 | `journal`（`journal/daily/`、`journal/logs/`） | 结构化生活指标与个人生活面板 | 部分 |
+| 英语单词与例句 | `language_item`（`learning/english/candidates/`、`learning/anki/`） | — | 已支持 |
+| 文献/PDF 与阅读笔记 | `source`（`sources/documents/`，Zotero 管理 PDF）+ `analysis`（`notes/analyses/`） | — | 已支持 |
+| AI 对话 | `source`（`sources/conversations/`，标注未核实） | — | 已支持 |
+| 引用的句子、完整诗作与格言 | — | 候选 Source 子类型 + 候选 `sources/excerpts/`；个人联想保留在 `annotation` | 规划 |
+
+| 输出 | 当前载体 / 未来目的地 | 状态 |
+|---|---|---|
+| 直接阅读 Obsidian 笔记 | Obsidian Vault | 已支持 |
+| 有依据的知识问答 | 未来只读问答 agent，答案引用 note ID/路径 | 规划 |
+| 稍后读队列 | `reading.base` | 已支持 |
+| 个人生活面板 | 未来仪表盘（结构化生活指标） | 规划 |
+| Anki 卡片 | `flashcard` → Yanki → Anki | 已支持 |
+| 周期性复习 | 未来定期复习流程 | 规划 |
+| 成熟的 Essay / 写作 | `essay`（`notes/essays/`） | 已支持 |
+
+**闭环设计**：输出可以成为新输入——例如一段知识问答的结论可回写为 `idea`/`essay` 并再次进入检索。因此，未来每一项**新输入**都必须声明它被哪些输出消费/呈现；每一项**新输出**都必须声明它的来源对象与所需字段。这避免「只收集不被消费」的仓库，也避免「没有数据支撑的面板/回答」。
+
 ## 2. 核心模型：三条互不混用的轴
 
 ### 2.1 内容类型 `type`
@@ -259,22 +287,24 @@ Obsidian Markdown → Yanki → Anki Desktop → AnkiWeb / 手机
 
 ## 10. Git 与备份
 
-- 主分支可直接采用 `main`，因为这是单人知识库。
+- 主分支可直接采用 `main`，因为这是单人知识库；版本身份由 `main` 上的 commit hash 表示，配合外部维护的 `last_known_good` 记录。
+- Linux 是自动捕获的唯一写入者；跨设备同步使用可审计 commit，默认 `pull --ff-only`，分叉时停止人工处理。
 - 一条手机输入创建一个独立文件，避免多人/多端同时追加同一文件。
 - 重要的自动化写入采用原子替换，写完后只暂存；由用户择机合并提交。
 - 追踪模板和稳定的 Obsidian 设置，忽略工作区布局、缓存和临时文件。
 - 大型 PDF、音视频默认不进入普通 Git。
 - Git 是版本历史，不是完整备份；至少保留一份异机或加密远程备份。
+- 软件回退与数据回退分离：普通回退只作用于蓝图代码与运行配置，正式 Vault 数据时间线保持单调前进，禁止用旧快照覆盖当前 Vault 或删除浸泡期用户数据（见 [D-022](DECISIONS.md#d-022vault-数据单调保留软件回退与数据回退分离)）。详见 [Git 规范](specifications/git-workflow.md) 与 [升级规范](specifications/upgrade-workflow.md)。
 
 ## 11. OpenClaw Skill 交付
 
 - 知识库相关 skill 与本蓝图同仓，统一放在仓库根目录的 `skills/`。
 - 正式 Vault 保持独立；skill 只包含工作流、脚本、引用资料和必要资源，不包含真实笔记或凭据。
-- 功能分支和 RC 标签用于把候选代码传到 Linux staging；只有该精确 commit 验证通过后，才能晋级 `main` 和正式标签。
-- production 只检出稳定标签，并通过 `skills.load.extraDirs` 直接加载本仓库 skill；staging 使用独立检出目录和测试 Vault。
-- 每个 agent 使用 `agents.list[].skills` 明确列出最终可见的 skill；该列表不替代系统级文件和命令权限。
+- 个人单用户使用 `main + commit hash + last_known_good` 简化发布：同一个 checkout 在维护模式下完成更新与验证后供 production 加载，不再强制 RC/正式标签或 staging/production 双 checkout。
+- 升级期间进入维护模式，合成/自动 E2E 数据只写入一次性、basename 以 `-test` 结尾的临时 Vault；production 启用前验证失败必须恢复配置并停止。
+- production 通过 `skills.load.extraDirs` 直接加载本仓库 skill，并使用 `agents.list[].skills` 明确列出每个 agent 最终可见的 skill；该列表不替代系统级文件和命令权限。
 - 自研 skill 不通过本地安装复制，避免高优先级旧副本遮盖 Git 中的权威版本。
-- 蓝图、schema、skill 和测试使用同一仓库标签发布；验证后不得改写候选 commit，异常时回退上一稳定标签。
+- 蓝图、schema、skill 和测试使用同一提交演进；异常时以 `git revert`/修复 commit 回退，不得改写候选 commit 或用旧快照覆盖数据。
 
 完整规则见 [OpenClaw Skill 开发、加载与发布规范](specifications/openclaw-skill-workflow.md)。
 

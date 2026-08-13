@@ -40,17 +40,40 @@ schema: migrate metadata to v2
 
 ## 4. 单写入者原则
 
-OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作区作为主要写入点。
+OpenClaw 将手机输入发送到家庭 Linux 主机，因此 Linux 工作区是自动捕获的**唯一写入者**。个人在 Windows、macOS、Linux 与 Android 设备之间同步，但只有 Linux 的自动捕获写入知识库；其余设备仅做拉取与人工编辑。
 
 为减少冲突：
 
 - 每条捕获创建独立文件。
 - 避免手机和桌面同时追加同一个 daily note。
 - 自动化写入采用临时文件完成后再原子替换。
+- 跨设备默认使用 `pull --ff-only`，保证只做可审计的前进式同步。
+- 远端分叉或本地工作树不干净时，停止自动处理，改为人工合并；不强制覆盖。
 - 同步或切换设备前检查暂存区，由用户决定何时提交和推送。
 - 发生冲突时保留双方内容，人工合并；不要强制覆盖。
 
-## 5. `.obsidian`
+## 5. 跨平台 Git 约束
+
+本知识库在 Windows、macOS、Linux、Android 之间同步，需遵守：
+
+- **文件系统大小写**：Git 仓库默认大小写敏感；Windows/macOS 文件系统可能大小写不敏感，因此**禁止仅大小写不同的 rename**（`Foo.md` → `foo.md`），避免跨平台无法检出。
+- **Windows 保留名与尾随字符**：避免使用 Windows 保留名（`CON`、`PRN`、`AUX`、`NUL`、`COM1-9`、`LPT1-9`）以及文件名尾随空格或尾随句点；否则 Windows 无法创建/检出。
+- **行尾（LF）**：仓库统一使用 LF；通过 `.gitattributes` 声明 `* text=auto eol=lf`，避免跨平台行尾漂移。
+- **symlink**：不依赖仓库内的 symlink（Windows 默认支持受限）；跨平台需要时改用真实文件或显式配置。
+- **Obsidian 设备状态**：忽略 `workspace.json`、`workspace-mobile.json` 等设备相关状态，不把设备特定布局提交入仓库（见 §7 `.obsidian`）。
+- **Android 设备**：视同只读/人工编辑端，不承担自动捕获写入；自动捕获唯一写入者为 Linux。
+
+## 6. 普通软件回退的边界
+
+普通软件回退（如 `git revert` 回退蓝图代码或恢复运行配置）**禁止**：
+
+- 倒退正式 Vault 的 HEAD 或时间线；
+- 用旧 Vault 快照覆盖当前 Vault；
+- 删除浸泡期（一周或更长）新增捕获、手写内容或附件。
+
+回退软件时应先冻结并保护当前 Vault，通过新代码提交回退行为，验证浸泡期数据仍存在。破坏性 `reset`/`clean` 仅限明确授权的灾难恢复，且需用户单独批准（数据单调保留见 [D-022](../DECISIONS.md#d-022vault-数据单调保留软件回退与数据回退分离)）。详见 [升级规范](upgrade-workflow.md)。
+
+## 7. `.obsidian`
 
 不要忽略整个 `.obsidian/`，因为模板设置、快捷键和稳定插件配置可能值得追踪。
 
@@ -62,7 +85,7 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 
 对社区插件的 `data.json` 逐项判断。包含设备路径、令牌或账号信息的配置不得提交。
 
-## 6. 附件
+## 8. 附件
 
 普通 Git 适合：
 
@@ -82,7 +105,7 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 
 学术 PDF 优先放 Zotero。确需版本管理的大型附件再评估 Git LFS、git-annex 或对象存储。
 
-## 7. 秘密与隐私
+## 9. 秘密与隐私
 
 不得提交：
 
@@ -95,7 +118,7 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 
 即使仓库是私有的，也要将秘密放在环境变量或专用密钥管理器中。
 
-## 8. 建议备份
+## 10. 建议备份
 
 至少包含：
 
@@ -105,7 +128,7 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此可将 Linux 工作
 4. Zotero 数据库与 PDF 附件的独立备份。
 5. Anki/AnkiWeb 之外的周期性 collection 导出。
 
-## 9. 恢复演练
+## 11. 恢复演练
 
 每季度抽查：
 

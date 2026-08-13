@@ -35,9 +35,8 @@
 
 - 建立仓库级 `skills/` 和 `tests/skills/` 结构。
 - 创建首个 `vault-capture` skill，定义描述、显式命令、依赖和失败边界。
-- 由功能分支提交开发快照，以不可变 RC 标签传到 Linux staging 验证。
-- 候选通过后，将同一 commit 晋级 `main` 和正式标签；production 只加载正式标签。
-- staging 与 production 使用独立检出目录、Vault 和 OpenClaw profile。
+- 在 `main` 上以 commit hash 作为版本身份开发；使用外部 `last_known_good` 记录稳定基线。
+- 更新时进入维护模式，在同一 checkout 中完成验证；合成/自动 E2E 只写入一次性 `*-test` 临时 Vault。
 - 使用 `agents.list[].skills` 为 Vault agent 配置完整 allowlist。
 - 实现 URL 规范化和 `canonical_url` 去重。
 - 立即创建 Source 占位文件。
@@ -45,9 +44,9 @@
 - 普通网页转 Markdown（仓库自有的确定性 `ingest-web`：Trafilatura + WeChat 适配 + Playwright 只读回退）。
 - 音视频生成带时间戳 transcript。
 - 每次自动化变更只暂存相关路径，由用户按批次生成可读 Git 提交。
-- 在临时 Vault 完成 `skills list/info/check`、RC 冒烟测试、稳定版晋级和回滚演练。
+- 在临时 Vault 完成 `skills list/info/check`、E2E 冒烟测试和回滚演练。
 
-退出条件：失败任务能在 `maintenance.base` 中被发现和重试；Vault agent 只加载预期 skill，且上一稳定标签可以恢复。
+退出条件：失败任务能在 `maintenance.base` 中被发现和重试；Vault agent 只加载预期 skill，且上一 `last_known_good` 可以恢复。
 
 ## 阶段 3：阅读工作台
 
@@ -71,8 +70,39 @@
 - 定期生成知识库健康报告。
 - 对已分析但未提炼 idea 的材料给出提示。
 - 对长期待读项目执行保留、推迟或放弃决策。
+- （未来）从 `journal` 提取结构化生活指标（时间管理、运动、睡眠）并汇总到个人生活面板。
+- （未来）建立周期性复习流程，定期回顾旧材料、待读项与观点。
 
 退出条件：维护不依赖记忆，而由面板和定期检查驱动。
+
+## 阶段 5：知识问答与输出
+
+目标：让知识库不只是存储，而是能被只读方式稳定地提问和输出。
+
+- 只读默认的 agent 能力清单（allowlist）：回答只消费既有 `source`/`annotation`/`analysis`/`idea`/`essay`/`journal` 等对象，不写入、不修改任何笔记。
+- 有依据地回答：答案引用具体 note ID 或路径，便于用户回跳到来源。
+- 依据不足时明确说明缺口，不编造来源。
+- （未来）成熟答案可落为 `idea`/`essay`，再进入检索与写作闭环。
+- （未来）将问答结论与输出回写为新输入，形成输入→输出闭环。
+
+退出条件：只读问答能针对既有笔记给出引用具体 note ID/路径的答案，且在不改动任何笔记的前提下覆盖主要对象类型。
+
+## 延后需求（候选，非当前 schema）
+
+以下两项输入能力已在设计讨论中确认方向，但**尚未在当前 schema/目录中激活**，`schema_version` 保持 `1`，不实现模板、字段或自动化，仅作未来设计登记。
+
+### A. 引文 / 诗作输入
+
+- 完整诗作或成形引文，连同提供的文字笔记，作为**候选 Source 子类型**，候选位置 `sources/excerpts/`；正文保持不可变。
+- 个人联想/关联保留在 `annotation`，不混入 Source 正文。
+- 未决问题：无 URL 的来源/出处如何登记；手机手动输入与照片 OCR 的输入路径；最终元数据与文件夹细节。
+
+### B. 问答（QA）输入
+
+- 候选判别符为 `type: idea` + **`kind: QA`**（大小写与拼写固定）。
+- 一个问题对应一个文件；当前答案、补充视角、后续追问/反思在同一 note 内迭代演进。
+- 不要求每个答案都抽成一个 Idea；仅当答案足够成熟、可独立使用时才在日后抽取为独立 Idea。
+- 未决问题：最终模板与状态机。
 
 ## 未来可选方向
 
@@ -92,3 +122,9 @@
 3. 提供可回滚的迁移说明。
 4. 先在小样本分支验证。
 5. 不静默覆盖 Source 正文或 Yanki `noteId`。
+
+另需满足：
+
+- 长期浸泡（一周或更长）允许在正式环境运行，期间正常捕获、手写、commit 与 sync 继续。
+- 失败时先保护当前 Vault，再以新代码提交（通常 `git revert`）回退软件；正式 Vault 数据时间线单调保留（见 [D-022](DECISIONS.md#d-022vault-数据单调保留软件回退与数据回退分离)），禁止回退整周数据 commit。
+- breaking schema 在进入长期正式测试前必须提供双读兼容 Adapter 或可逆、幂等、冲突安全的字段级迁移，并提供 migration/rollback 指导。
