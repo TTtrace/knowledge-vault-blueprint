@@ -87,6 +87,21 @@
 
 退出条件：只读问答能针对既有笔记给出引用具体 note ID/路径的答案，且在不改动任何笔记的前提下覆盖主要对象类型。
 
+## 阶段 6：SourceNotes 单入口运行基础（本阶段）
+
+目标：为正式生产运行建立「用户 → Steward（唯一入口）→ NotesVaulter」单入口拓扑、受控入口与 Vault 外运维工具。**本阶段只建立并验证蓝图、技能与通用工具，不迁移正式数据、不切换生产、不修改活动 OpenClaw 配置。**
+
+- 单入口拓扑：Steward 规范委派/授权/汇总，不直接写 Vault；NotesVaulter 统一 Capture / Query / Maintenance 三能力（原则见 [D-023](DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算)）。
+- 受控 entrypoint（`scripts/sourcenotes_agent.py`）：固定 capture/query/maintenance 子命令，只从 `VAULT_ROOT` 读取目标，拒绝路径穿越、任意 Vault、非 Markdown 读取与超限输出；后续可用 exec allowlist 收窄 NotesVaulter。
+- 单层委派：网页抓取在当前 NotesVaulter 委派运行内确定性完成（`ingest-web`），不再要求 spawn worker。
+- Query 只读能力：有界 search/show/related，答案携带 note ID/相对路径（阶段 5 的实现基础）。
+- Maintenance 只读报告：Git 状态、failed/manual、缺失引用、附件预算与 2 GiB 闸门（阶段 4 的实现基础）。
+- 附件策略：同 Source 事务内内容去重；单附件 5 MiB、单 Source 30 MiB（物理落盘唯一附件字节）为软告警；总量 2 GiB 为决策闸门（仅报告）。
+- 运维工具（`scripts/sourcenotes_ops.py`）：audit / manifest 驱动的冲突安全迁移 / health / 外置 ledger / 外置 incident（秘密扫描失败关闭）。
+- 测试：`tests/operations/**` 覆盖受控入口、只读 Query/Maintenance、审计与迁移、incident/ledger/health 边界。
+
+退出条件：临时 Vault 与单元测试证明受控入口、只读 Query/Maintenance、审计/迁移、incident/ledger/health 契约稳定；正式生产切换（迁移数据、修改活动配置、启用 Steward 委派）是后续阶段，须另行批准后执行。
+
 ## 延后需求（候选，非当前 schema）
 
 以下两项输入能力已在设计讨论中确认方向，但**尚未在当前 schema/目录中激活**，`schema_version` 保持 `1`，不实现模板、字段或自动化，仅作未来设计登记。
@@ -110,7 +125,7 @@
 - 本地全文检索或向量检索。
 - 将 AI 生成内容统一标记 `verification: unverified`。
 - 从 Zotero/Obsidian 生成引用驱动的写作项目。
-- 为附件引入 Git LFS、git-annex 或对象存储。
+- 为附件引入 Git LFS、git-annex 或对象存储（**触发条件**：Vault 附件总量达到 2 GiB 决策闸门后评估；在此之前只由 health/maintenance 报告附件预算，见 [D-023](DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算)）。
 - 对 schema 进行自动迁移和版本检查。
 
 ## 升级规则

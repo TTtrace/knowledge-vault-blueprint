@@ -27,6 +27,7 @@
 | D-020 | 个人单用户 commit-based 简化发布 | accepted（取代 D-015 的现行流程） |
 | D-021 | 输入与输出双向可追溯是架构设计闸门 | accepted |
 | D-022 | Vault 数据单调保留，软件回退与数据回退分离 | accepted |
+| D-023 | 单入口运行拓扑：Steward 唯一入口 + NotesVaulter 三能力 + 附件预算 | accepted |
 
 ## D-019：198.18.0.0/16 SSRF 信任例外
 
@@ -253,3 +254,22 @@
 - 用旧快照覆盖当前 Vault 或回退整周 commit 会破坏用户后续编辑、Source 正文、未知属性与 Yanki `noteId`。
 
 **边界**：三类 schema 约束与回滚边界——纯行为变化只回退代码；向后兼容的增量字段由旧代码忽略并保留；改变字段含义或结构的版本在进入长期正式测试前必须提供双读兼容 Adapter 或可逆、幂等、冲突安全的字段级迁移。逆向迁移不得覆盖用户后续编辑、Source 正文、未知属性或 Yanki `noteId`。灾难恢复与普通回退明确区分。`schema_version` 保持不变（本决策只约束回退与保留策略，不触发 Vault 迁移）。
+
+## D-023：单入口运行拓扑：Steward 唯一入口 + NotesVaulter 三能力 + 附件预算
+
+**决定**：正式运行采用「用户 → Steward（唯一入口）→ NotesVaulter（Capture / Query / Maintenance）」单入口拓扑，并以「单一入口、清晰结构、渐进披露、最少必要确认」为正式架构原则。Steward 负责规范委派、授权与简洁汇总，不直接写 Vault、不复制 NotesVaulter 的知识职责。NotesVaulter 通过固定子命令的受控 entrypoint 操作 Vault，不接受任意 shell/Python/任意目标根目录，后续可用 exec allowlist 收窄权限。网页抓取在当前 NotesVaulter 委派运行内确定性完成（单层委派），不再要求它继续 spawn worker。Query 与 Maintenance 本阶段严格只读；Query 答案必须引用 note ID/相对路径，证据不足时明确说明缺口；Maintenance 只报告、不修复，写操作回 Steward 申请批准。
+
+**附件预算**：网页抓取附件暂用普通 Git。同一 Source 事务内内容 SHA-256 相同的附件只落一份，正文多个位置可引用同一路径；不做跨 Source 全局去重（避免破坏来源隔离）。单文件超过 5 MiB 或单 Source 事务**物理落盘唯一附件字节**超过 30 MiB 只产生稳定 JSON warning（重复 token 映射不重复计入预算），不降低 `ready`、不丢附件（20 MiB 单图、100 MiB 单篇下载字节合计仍为安全硬限制）。Vault 附件总量达到 2 GiB 是决策闸门：只由 health/maintenance 报告，不自动迁移、不自动删除；达到后再评估 Git LFS/git-annex/对象存储。
+
+**Incident 与日志边界**：incident bundle、operation ledger 与 health 状态文件一律位于正式 Vault 与公开蓝图库之外；incident 可保留完整 URL、错误、必要上下文与显式提供的诊断文件，但任何 token/Cookie/password/private key 一律禁止，命中时失败关闭不写 bundle；bundle/ledger/health 默认目录 0700、文件 0600。
+
+**理由**：
+
+- 用户只与 Steward 对话，避免多个 agent 各自向用户解释行为；委派、授权、汇总集中在单一入口，界面行为可预期。
+- NotesVaulter 统一三能力避免能力碎片化；受控 entrypoint 让「exec allowlist 限定 NotesVaulter」成为可行收窄，而不是授予通用宿主命令。
+- 单层委派减少 main→orchestrator→worker 层级与任务恢复复杂度；确定性 `ingest-web` 已保证抓取质量，无需嵌套 worker。
+- 附件预算用软告警 + 决策闸门替代隐性硬失败：Git 可承受前不打断捕获，阈值到顶时由用户决策，不自动改存储方案。
+
+**边界**：`schema_version` 保持 `1`，无 Vault 迁移；不改变既有对象、目录、生命周期含义；不覆盖 D-020（发布/回退流程）、D-022（Vault 数据单调保留）、D-016（只暂存不提交）、D-004（抓取/阅读状态分离）、Source 正文不可变、Yanki `noteId` 等既有不变量。本决策只确立运行拓扑与工具契约，正式生产切换与迁移属于后续阶段，需另行批准。
+
+**回滚**：删除本决策表行与本节即可，不触碰其它决策；无 schema/Vault 迁移。

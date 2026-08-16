@@ -308,6 +308,27 @@ Obsidian Markdown → Yanki → Anki Desktop → AnkiWeb / 手机
 
 完整规则见 [OpenClaw Skill 开发、加载与发布规范](specifications/openclaw-skill-workflow.md)。
 
+### 11.1 运行拓扑：Steward 唯一入口 → NotesVaulter
+
+正式运行期的用户可见拓扑保持单入口：
+
+```mermaid
+flowchart LR
+    U["用户"] --> S["Steward（唯一入口）"]
+    S -->|规范委派 / 授权 / 汇总| N["NotesVaulter"]
+    N -->|Capture| Cap["捕获与抓取"]
+    N -->|Query| Que["只读问答与检索"]
+    N -->|Maintenance| Mnt["Vault 健康与维护"]
+    N -.->|仅代码级调试/升级时介入| O["opencode"]
+```
+
+- **Steward 是用户唯一入口**：负责规范委派、授权与简洁汇总，不直接写 Vault，不复制 NotesVaulter 的知识职责。
+- **NotesVaulter 统一承担三能力**：Capture（落盘、批注聚合、确定性网页抓取）、Query（只读检索，答案必须引用 note ID/相对路径）、Maintenance（只读健康报告；任何修复由后续显式批准）。
+- **渐进披露**：用户界面默认只显示结果、异常与必要决策；内部详情（命令、中间产物、底层日志）按需展开，不主动暴露。
+- **最少必要确认**：只在写操作、跨 Source 迁移、manual 重试、冲突处置与 2 GiB 附件决策闸门等场景询问用户（详见 [委派与操作规范](specifications/agent-operations.md)）。
+- **受控入口**：NotesVaulter 通过固定子命令的受控 entrypoint（`scripts/sourcenotes_agent.py`）操作 Vault，不接受任意 shell/Python/任意目标根目录；后续可用 exec allowlist 收窄权限。
+- 网页抓取在当前 NotesVaulter 委派运行内确定性完成，不再要求它继续 spawn worker（单层委派）。
+
 ## 12. 成功标准
 
 首版运行一个月后，应能回答：

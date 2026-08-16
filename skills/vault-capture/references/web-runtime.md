@@ -80,6 +80,13 @@ static HTTP fetch（先试）
 - 不下载正文以外媒体（头像、二维码、广告、追踪像素、评论、推荐、音频、视频）。
 - 依赖与浏览器安装只走一次性路径。
 
+### 5.1 附件去重与软告警
+
+- 同一 Source 事务内，图片按完整 SHA-256 做内容去重：相同内容只保留一个实际附件路径，所有 token/正文位置映射到该路径；**不跨 Source 查找或复用**，避免破坏来源隔离。图片顺序、alt/caption 与引用完整保留。
+- 单文件下载超过 5 MiB 或事务**物理落盘唯一附件字节**超过 30 MiB 时，在成功 JSON 中加入稳定 machine-readable `warnings`（`attachment_over_5MiB` / `attachment_total_over_30MiB`；重复 token 映射不重复计入 30 MiB 预算）；warning 不改变 `ready`、不丢附件。
+- 20 MiB 单图硬限制不变；100 MiB 单篇合计是**下载字节**安全上限（重复下载仍计入），两者都先于软告警失败关闭，不得放宽。
+- Vault 附件总量 2 GiB 是决策闸门：由 health/maintenance 报告，本运行时不做任何自动迁移/删除。
+
 ## 6. 操作指引（主机部署，非本仓库改动）
 
 正式主机（Linux/OpenClaw）操作步骤：

@@ -96,6 +96,14 @@ OpenClaw 将手机输入发送到家庭 Linux 主机，因此 Linux 工作区是
 
 网页捕获的正文图片统一放在 `assets/images/<source-id>/`，与完成后的 Source 和 Annotation 在同一次完成事务中暂存。图片先下载到 `.queue/` 下的临时目录；清单不完整、格式不支持或任一下载失败时，不暂存附件，也不得把 Source 标记为 `ready`。
 
+附件预算与去重（原则见 [D-023](../DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算)）：
+
+- **同 Source 去重**：同一 Source 事务内内容 SHA-256 相同的附件只保留一个实际附件路径，正文多个 token/位置映射到该路径；不做跨 Source 全局去重，避免破坏来源隔离。
+- **软告警**：单附件超过 5 MiB 或单 Source 事务**物理落盘唯一附件字节**超过 30 MiB 时，在成功 JSON 中加入稳定 machine-readable `warnings`；重复内容映射不重复计入 30 MiB 预算；warning 不降低 `ready`、不丢附件。
+- **硬限制不变**：单下载图片 20 MiB、单篇**下载字节**合计 100 MiB（重复下载仍计入）继续是安全硬限制，不能被软告警取代或放宽。
+- **2 GiB 决策闸门**：Vault 附件总量达到 2 GiB 时，由 health/maintenance 报告，不自动迁移、不自动删除；是否引入 Git LFS/git-annex/对象存储由用户决定。
+- **日常 Git 冲突闸门**：自动化写入前检查目标文件是否存在未暂存修改或未跟踪的既有文件，存在即停止并报告冲突；远端分叉或本地工作树冲突时停止自动处理，人工合并，不强制覆盖（见 [D-016](../DECISIONS.md#d-016vault-捕获只暂存)）。
+
 不适合：
 
 - 大量 PDF。

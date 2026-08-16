@@ -19,15 +19,15 @@ flowchart TD
     B --> C["生成 ID 和临时文件路径"]
     C --> D["写入 Source 占位文件"]
     D --> E["Git 暂存：capture stub"]
-    E --> F["创建后台任务"]
-    F --> G["抓取 / 转写 / OCR"]
+    E --> F["创建队列任务（job_created）"]
+    F --> G["同一委派运行内确定性抓取 ingest-web"]
     G -->|成功| H["写入正文与元信息"]
     G -->|失败| I["记录错误并等待重试"]
     H --> J["Git 暂存：ingest ready"]
     I --> K["Git 暂存：ingest failed"]
 ```
 
-占位文件必须在网络请求前写入。
+占位文件必须在网络请求前写入。**单层委派**：网页完成在当前 NotesVaulter 委派运行内调用确定性 `ingest-web` 完成，不再要求它继续 spawn worker（外层同步/异步行为由 Steward 管理，见 [委派与操作规范](agent-operations.md)）。
 
 ## 3. 推荐输入协议
 
@@ -112,7 +112,7 @@ flowchart TD
 - 内容变化时将相关路径加入 Git 暂存区，不自动提交，也不覆盖未暂存的人工修改。
 - 页面噪声、导航、推荐列表和评论区应在转换时清理。
 - 保留标题层级、段落、引用、列表、表格、代码、强调、链接、正文图片和图注的原始顺序；不得用摘要或连续纯文本替代原文结构。
-- 正文图片下载到 `assets/images/<source-id>/`，并改写为标准相对 Markdown 链接。任一有效正文图片失败时不得标记 `ready`。
+- 正文图片下载到 `assets/images/<source-id>/`，并改写为标准相对 Markdown 链接。任一有效正文图片失败时不得标记 `ready`。同一 Source 事务内内容 SHA-256 相同的附件只落一份，多个正文位置引用同一路径；单附件 >5 MiB、单 Source **物理落盘唯一附件字节** >30 MiB 只产生稳定 warning（重复 token/正文位置不重复计入，不降 `ready`、不丢附件），20 MiB 单下载图片、100 MiB 单篇**下载字节**硬限制不变（见 [git-workflow.md](git-workflow.md) §8 与 [D-023](../DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算)）。
 - 保留标题、作者、发布时间、URL 和抓取时间。
 - Annotation 中保存的引文是用户标注时看到的版本，refresh Source 正文时不得回写或覆盖这些引文。
 - 网页正文抓取通过仓库自有的确定性 `ingest-web` 命令完成：静态抓取优先，WeChat 站点专用适配，不足时用只读 Playwright 渲染回退；完整读取响应、提取正文与元数据、生成 `vault-image://` token 图片清单，并直接复用原子 `finalize`/`fail` 事务。正文 Markdown 不经过 agent 或 chat 载荷往返。详见 `skills/vault-capture/references/web-runtime.md`。

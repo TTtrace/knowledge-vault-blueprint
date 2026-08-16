@@ -79,6 +79,8 @@ IMAGE_TYPES = {
 }
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_ARTICLE_IMAGE_BYTES = 100 * 1024 * 1024
+WARN_IMAGE_OVER_5MIB = 5 * 1024 * 1024
+WARN_SOURCE_OVER_30MIB = 30 * 1024 * 1024
 TRACKING_KEYS = {
     "fbclid",
     "gclid",
@@ -320,7 +322,19 @@ def download_image_assets(
     source_url: str,
     *,
     policy=None,
-) -> tuple[str, Path | None, list[tuple[Path, Path]]]:
+) -> tuple[str, Path | None, list[tuple[Path, Path]], list[dict[str, Any]]]:
+    """Download and localize article images with same-Source content dedup.
+
+    Within one Source transaction, images whose full SHA-256 is identical map to
+    a single physical attachment path; every token/body position references that
+    path.  No cross-Source lookup or reuse ever happens.
+
+    Warnings are stable machine-readable entries; they never lower ``ready`` and
+    never drop attachments.  The 30 MiB per-Source warning budget counts physical
+    unique attachment bytes only (duplicate token mappings are not re-counted).
+    Hard limits (20 MB per image, 100 MB per article of downloaded bytes) remain
+    enforced before any warning is produced.
+    """
     policy = _policy_for(policy)
     if not isinstance(raw_images, list):
         raise CaptureError("images must be a list", EXIT_INPUT)
@@ -340,13 +354,16 @@ def download_image_assets(
     if len(markdown_tokens) != len(set(markdown_tokens)) or set(markdown_tokens) != tokens:
         raise CaptureError("Markdown image placeholders must match the image manifest exactly", EXIT_INPUT)
     if not images:
-        return markdown, None, []
+        return markdown, None, [], []
 
     queue_root = vault_path(vault, ".queue")
     queue_root.mkdir(parents=True, exist_ok=True)
     temp_root = Path(tempfile.mkdtemp(prefix=f"vault-capture-{source_id}-", dir=queue_root))
     moves: list[tuple[Path, Path]] = []
-    total = 0
+    warnings: list[dict[str, Any]] = []
+    dedup: dict[str, Path] = {}
+    download_total = 0
+    physical_total = 0
     rewritten = markdown
     opener = build_opener(_NoRedirectImageHandler)
     try:
@@ -383,20 +400,40 @@ def download_image_assets(
                 raise CaptureError("Image download failed", EXIT_STORAGE)
             if len(data) > MAX_IMAGE_BYTES:
                 raise CaptureError("An image exceeds the 20 MB limit", EXIT_INPUT)
-            total += len(data)
-            if total > MAX_ARTICLE_IMAGE_BYTES:
+            # The 100 MB article cap counts every downloaded byte (download
+            # semantics, duplicates included) and is unchanged.
+            download_total += len(data)
+            if download_total > MAX_ARTICLE_IMAGE_BYTES:
                 raise CaptureError("Article images exceed the 100 MB limit", EXIT_INPUT)
             image_type = IMAGE_TYPES.get(content_type)
             if image_type is None or not image_type[1](data):
                 raise CaptureError("Image content type or signature is unsupported", EXIT_INPUT)
-            digest = hashlib.sha256(data).hexdigest()[:12]
+            full_digest = hashlib.sha256(data).hexdigest()
+            existing = dedup.get(full_digest)
+            if existing is not None:
+                # Same content in this Source transaction: keep one physical
+                # attachment; every token maps to the shared path.  Duplicate
+                # bytes are not re-counted into the 30 MiB budget (physical
+                # unique bytes only).
+                rewritten = rewritten.replace(
+                    f"vault-image://{image['token']}",
+                    f"../../{relative(vault, existing)}",
+                )
+                continue
+            physical_total += len(data)
+            if len(data) > WARN_IMAGE_OVER_5MIB:
+                warnings.append({"code": "attachment_over_5MiB", "token": image["token"], "bytes": len(data)})
+            digest = full_digest[:12]
             filename = f"{index:03d}-{digest}.{image_type[0]}"
             staged = temp_root / filename
             staged.write_bytes(data)
             destination = vault_path(vault, f"assets/images/{source_id}/{filename}")
+            dedup[full_digest] = destination
             moves.append((staged, destination))
             rewritten = rewritten.replace(f"vault-image://{image['token']}", f"../../assets/images/{source_id}/{filename}")
-        return rewritten, temp_root, moves
+        if physical_total > WARN_SOURCE_OVER_30MIB:
+            warnings.append({"code": "attachment_total_over_30MiB", "source_id": source_id, "total_bytes": physical_total})
+        return rewritten, temp_root, moves, warnings
     except Exception:
         shutil.rmtree(temp_root, ignore_errors=True)
         raise
@@ -1255,7 +1292,7 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None, *, 
         temp_root: Path | None = None
         moves: list[tuple[Path, Path]] = []
         try:
-            markdown, temp_root, moves = download_image_assets(
+            markdown, temp_root, moves, warnings = download_image_assets(
                 vault,
                 source_id,
                 markdown,
@@ -1359,6 +1396,7 @@ def cmd_finalize(vault: Path, source_id: str, input_file: str | None = None, *, 
             "ingest_status": "ready",
             "content_hash": updates["content_hash"],
             "paths_final": True,
+            "warnings": warnings,
             "methods_attempted": list(data.get("methods_attempted") or []),
         }
 

@@ -1,5 +1,17 @@
 # 运行契约
 
+## 受控入口
+
+NotesVaulter 通过仓库受控入口 `scripts/sourcenotes_agent.py capture <子命令>` 调用下方契约，不直接以任意参数执行底层脚本、不接受任意目标根目录；Vault 只由宿主配置的 `VAULT_ROOT` 决定。底层 `vault_capture.py` 命令仍是语义的唯一事实来源，测试与调试可直接使用。委派 envelope 与输出边界见 [specifications/agent-operations.md](../../../specifications/agent-operations.md)。
+
+```text
+sourcenotes_agent.py capture preflight
+sourcenotes_agent.py capture stage [--json-file FILE]   # UTF-8 JSON file or stdin（上限 1 MiB）
+sourcenotes_agent.py capture ingest ID                  # 等价于 ingest-web：确定性网页抓取
+sourcenotes_agent.py capture inspect ID
+sourcenotes_agent.py capture list-retryable [ID]
+```
+
 ## 命令
 
 所有命令都向标准输出写出一个 JSON 对象。除非隔离测试显式传入 `--vault`，否则使用 `VAULT_ROOT`。
@@ -91,6 +103,8 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 每个 token 必须安全、唯一，并在 Markdown 中恰好出现一次；Markdown 中的占位符与 `images` 必须完全一致。脚本把图片写入 `assets/images/<source-id>/`，按正文顺序命名为 `<三位序号>-<内容哈希前12位>.<扩展名>`，再把占位符改为标准相对 Markdown 链接。允许 JPEG、PNG、WebP、GIF；单图上限 20 MB，单篇合计上限 100 MB。图片 URL 与每次图片重定向都必须在连接前通过共享 SSRF 策略，且必须使用 DNS 主机名（拒绝 IP 字面量）；任一图片失败时不得写入正文或设置 `ready`。
 
+**同 Source 去重与软告警**：同一 Source 事务内完整 SHA-256 相同的附件只保留一个实际附件路径，所有 token/正文位置映射到该路径；不做跨 Source 查找/复用。单文件下载字节数超过 5 MiB 时在成功 JSON 的 `warnings` 中加入 `{"code": "attachment_over_5MiB", "token": ..., "bytes": ...}`；单篇事务**物理落盘唯一附件字节**超过 30 MiB 时加入 `{"code": "attachment_total_over_30MiB", "source_id": ..., "total_bytes": ...}`（重复 token 映射不重复计入）。warning 不改变 `ready`、不丢附件，也不取代 20 MiB/100 MiB 安全硬限制（100 MiB 为下载字节语义，重复下载仍计入；超限仍失败关闭）。
+
 完成后 Source 使用 `<作者>--<正式标题>--<captured日期>--<source-id>.md`，Annotation 使用 `annotated_<作者>--<正式标题>--<captured日期>--<source-id>.md`。作者按署名、publisher、域名、`未知作者` 的顺序回退。作者和标题文件名部分分别限制为 32 与 80 字符，frontmatter 保留完整值。脚本负责计算 `content_hash`；存在摘要时设置 `verification: unverified`；只有 Source、Annotation、图片和 Git 暂存全部成功后才把队列与 Source 改为 `ready`。输出返回最终 `source_path`、`annotation_path`、`asset_paths`、`staged_paths` 和 `paths_final: true`。
 
 `fail` 接受：
@@ -105,7 +119,7 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 
 不得把原始 HTML、堆栈信息、Token、Cookie、Authorization Header 或主机绝对路径写入 `error`。
 
-## `ingest-web`
+## `ingest-web`（受控入口：`capture ingest ID`）
 
 `ingest-web ID` 是唯一新增的会改变状态的网页入口。它读取队列任务中的 URL（不使用调用方提供的替换 URL），使用仓库自有的确定性抓取运行时（详见 [web-runtime.md](web-runtime.md)）：
 
@@ -113,6 +127,8 @@ Linux/OpenClaw 应使用 `SKILL.md` 中带单引号的 heredoc。Windows PowerSh
 - 完整读取响应，不静默截断；正文 Markdown 不经过 agent 或 chat 载荷。
 - 提取正文与元数据，生成 `vault-image://` token 图片清单，并直接复用既有原子 `finalize`/`fail` 事务完成最终命名、图片本地化与 Git 暂存。
 - 标题/元数据仅提取、正文过短、挑战页、不支持 content type、超限响应、Markdown 与图片清单不一致时，绝不进入 `ready`。
+
+**单层委派**：NotesVaulter 在同一委派运行内依次调用 `capture inspect <id>` 与 `capture ingest <id>` 完成网页抓取，不再要求 spawn 网页 worker；外层同步/异步行为由 Steward 管理。成功 JSON 的 `warnings` 携带附件软告警（见 `finalize` 去重与软告警一节）。
 
 输出与 `finalize` 成功一致：`ingest_status: ready`、最终 `source_path`/`annotation_path`/`asset_paths` 与 `paths_final: true`。验证码/登录/验证/限流/浏览器 profile 需要映射为 `manual`；超时/DNS/HTTP 5xx/暂时性错误保持 `failed` 可重试。
 

@@ -42,7 +42,7 @@
 
 ## 5. 外部操作账本
 
-- operation ledger 与 incident bundle 位于 Vault 与蓝图库之外（蓝图库只保存格式、工具与 runbook）。
+- operation ledger 与 incident bundle 位于 Vault 与蓝图库之外（蓝图库只保存格式、工具与 runbook）。工具为 `scripts/sourcenotes_ops.py` 的 `ledger`/`incident`/`health` 子命令：目录 0700、文件 0600、原子写入；incident 允许完整 URL/错误/上下文与显式诊断文件，但递归扫描 token/Cookie/password/private-key 模式，命中即失败关闭不写 bundle。
 - ledger 最小字段（不含正文）：
   - `blueprint_commit`
   - `vault_head`
@@ -51,6 +51,11 @@
   - `affected_path`（路径角色或脱敏相对路径）
   - 时间戳与处置状态
 - 蓝图库文档不写入真实正文、逐篇标题/URL、trajectory、secret 或完整主机配置。
+
+### 5.1 单入口与附件预算
+
+- 运行拓扑为「用户 → Steward（唯一入口）→ NotesVaulter（Capture / Query / Maintenance）」，Steward 不直接写 Vault；NotesVaulter 通过受控 entrypoint `scripts/sourcenotes_agent.py` 操作 Vault（见 [D-023](../DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算) 与 [agent-operations.md](agent-operations.md)）。升级/维护写操作一律经 Steward 批准。
+- 附件预算：同 Source 事务内内容去重；5 MiB/30 MiB（单 Source **物理落盘唯一附件字节**，重复 token 不重复计入）为软告警（不降 `ready`、不丢附件）；20 MiB 单下载图片、100 MiB 单篇**下载字节**硬限制不变；总量 2 GiB 为决策闸门（仅报告，不自动迁移）。
 
 ## 6. 回退
 

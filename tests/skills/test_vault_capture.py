@@ -31,6 +31,14 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 
+# Padded-after-signature fixtures: the signature check only inspects the first
+# bytes, so padding lets us exercise the 5/20/30 MiB thresholds without real
+# image generators.
+LARGE_PNG = PNG_BYTES + b"\x00" * (5 * 1024 * 1024 + 64 * 1024)          # >5 MiB, <20 MiB
+MEDIUM_PNG_A = PNG_BYTES + b"\x00" * (16 * 1024 * 1024)                  # ~16 MiB, unique content
+MEDIUM_PNG_B = PNG_BYTES + b"\x01" * (16 * 1024 * 1024)                  # ~16 MiB, unique content
+HUGE_PNG = PNG_BYTES + b"\x00" * (20 * 1024 * 1024 + 1)                  # >20 MiB hard limit
+
 
 class _ScopedResult:
     def __init__(self, url: str) -> None:
@@ -63,12 +71,20 @@ SCOPED_POLICY = ScopedFixturePolicy()
 def image_server():
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/image.png":
+            payloads = {
+                "/image.png": (PNG_BYTES, "image/png"),
+                "/large.png": (LARGE_PNG, "image/png"),
+                "/medium.png": (MEDIUM_PNG_A, "image/png"),
+                "/medium2.png": (MEDIUM_PNG_B, "image/png"),
+                "/huge.png": (HUGE_PNG, "image/png"),
+            }
+            if self.path in payloads:
+                data, content_type = payloads[self.path]
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(PNG_BYTES)))
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(PNG_BYTES)
+                self.wfile.write(data)
             elif self.path == "/not-image":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -779,15 +795,148 @@ class VaultCaptureTests(unittest.TestCase):
 
     def test_skill_python_commands_use_quoted_interpreter_fallback(self):
         # Every vault-capture Python command in SKILL.md must use the quoted
-        # optional-interpreter fallback; VAULT_CAPTURE_PYTHON must not be
-        # required by requires.env.
+        # optional-interpreter fallback through the controlled entrypoint;
+        # VAULT_CAPTURE_PYTHON must not be required by requires.env.
         skill = (REPO / "skills/vault-capture/SKILL.md").read_text(encoding="utf-8")
-        # No bare `python3 {baseDir}/scripts/vault_capture.py` invocation remains.
-        self.assertNotRegex(skill, r"(?m)^python3 \{baseDir\}/scripts/vault_capture\.py")
-        # The quoted fallback form is used.
-        self.assertIn('"${VAULT_CAPTURE_PYTHON:-python3}" {baseDir}/scripts/vault_capture.py', skill)
+        # No bare `python3 {baseDir}/...` invocation remains.
+        self.assertNotRegex(skill, r"(?m)^python3 \{baseDir\}/")
+        # The quoted fallback form drives the controlled capture entrypoint.
+        self.assertIn(
+            '"${VAULT_CAPTURE_PYTHON:-python3}" {baseDir}/../../scripts/sourcenotes_agent.py capture',
+            skill,
+        )
         # requires.env does not list VAULT_CAPTURE_PYTHON (optional, not required).
         self.assertNotIn("VAULT_CAPTURE_PYTHON\n", skill.split("env:")[1].split("---")[0])
+
+    def test_skill_single_delegation_inline_ingest(self):
+        # AC-03: the skill completes stage → ingest-web inside the delegated run
+        # and must not instruct spawning a web worker (sessions_spawn) anymore.
+        skill = (REPO / "skills/vault-capture/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("sourcenotes_agent.py capture ingest", skill)
+        self.assertIn("单层委派", skill)
+        self.assertNotIn("sessions_spawn", skill)
+
+    def _finalize_markdown(self, staged, markdown, images):
+        return self._finalize_in_process(
+            staged,
+            {
+                "title": "附件策略文章",
+                "author": [],
+                "publisher": "示例站点",
+                "markdown": markdown,
+                "images": images,
+                "images_complete": True,
+                "final_url": "https://example.com/article?a=1&b=2",
+                "retrieved_at": "2026-08-04T09:31:00+08:00",
+            },
+        )
+
+    def test_finalize_dedups_same_source_attachments(self):
+        # AC-09: identical content in one Source transaction is written once and
+        # every token/body position maps to the shared path; Git staging is exact.
+        staged = self.stage_web(annotations=[])
+        with image_server() as server:
+            finalized = self._finalize_markdown(
+                staged,
+                "# 去重文章\n\n![第一张](vault-image://one)\n\n![第二张](vault-image://two)",
+                [
+                    {"token": "one", "url": f"{server}/image.png"},
+                    {"token": "two", "url": f"{server}/image.png"},
+                ],
+            )
+        self.assertEqual(finalized["ingest_status"], "ready")
+        self.assertEqual(len(finalized["asset_paths"]), 1)
+        asset = self.vault / finalized["asset_paths"][0]
+        self.assertTrue(asset.is_file())
+        self.assertRegex(asset.name, r"^001-[a-f0-9]{12}\.png$")
+        source_text = (self.vault / finalized["source_path"]).read_text(encoding="utf-8")
+        link = f"![第一张](../../{finalized['asset_paths'][0]})"
+        self.assertIn(link, source_text)
+        self.assertIn(f"![第二张](../../{finalized['asset_paths'][0]})", source_text)
+        self.assertEqual(source_text.count(f"../../{finalized['asset_paths'][0]}"), 2)
+        staged_paths = git(self.vault, "diff", "--cached", "--name-only").stdout.splitlines()
+        self.assertEqual(staged_paths.count(finalized["asset_paths"][0]), 1)
+        self.assertIn(finalized["source_path"], staged_paths)
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD").stdout.strip(), self.initial_head)
+
+    def test_finalize_warns_over_5MiB_without_failing(self):
+        # AC-09: a single attachment >5 MiB produces a stable warning, keeps
+        # ready, and does not drop the attachment (hard 20 MiB limit untouched).
+        staged = self.stage_web(annotations=[])
+        with image_server() as server:
+            finalized = self._finalize_markdown(
+                staged,
+                "# 大图文章\n\n![大图](vault-image://big)",
+                [{"token": "big", "url": f"{server}/large.png"}],
+            )
+        self.assertEqual(finalized["ingest_status"], "ready")
+        self.assertEqual(len(finalized["asset_paths"]), 1)
+        codes = [warning["code"] for warning in finalized["warnings"]]
+        self.assertIn("attachment_over_5MiB", codes)
+        over = [w for w in finalized["warnings"] if w["code"] == "attachment_over_5MiB"][0]
+        self.assertGreater(over["bytes"], 5 * 1024 * 1024)
+        self.assertTrue((self.vault / finalized["asset_paths"][0]).is_file())
+        self.assertNotIn("attachment_total_over_30MiB", codes)
+
+    def test_finalize_warns_total_over_30MiB_without_failing(self):
+        # AC-09: a Source transaction whose attachments total >30 MiB warns but
+        # stays ready; both attachments are kept and staged.
+        staged = self.stage_web(annotations=[])
+        with image_server() as server:
+            finalized = self._finalize_markdown(
+                staged,
+                "# 大文章\n\n![A](vault-image://a)\n\n![B](vault-image://b)",
+                [
+                    {"token": "a", "url": f"{server}/medium.png"},
+                    {"token": "b", "url": f"{server}/medium2.png"},
+                ],
+            )
+        self.assertEqual(finalized["ingest_status"], "ready")
+        self.assertEqual(len(finalized["asset_paths"]), 2)
+        codes = [warning["code"] for warning in finalized["warnings"]]
+        self.assertIn("attachment_total_over_30MiB", codes)
+        total = [w for w in finalized["warnings"] if w["code"] == "attachment_total_over_30MiB"][0]
+        self.assertGreater(total["total_bytes"], 30 * 1024 * 1024)
+        self.assertEqual(len(list((self.vault / "assets/images" / staged["id"]).iterdir())), 2)
+
+    def test_finalize_duplicate_large_images_budget_physical_unique_bytes(self):
+        # FIX-F08: two identical 16 MiB contents dedup to one physical file, so
+        # the 30 MiB budget counts 16 MiB (physical unique bytes) and must NOT
+        # trigger; every body position still maps to the shared path.
+        staged = self.stage_web(annotations=[])
+        with image_server() as server:
+            finalized = self._finalize_markdown(
+                staged,
+                "# 去重大图文章\n\n![甲](vault-image://a)\n\n![乙](vault-image://b)",
+                [
+                    {"token": "a", "url": f"{server}/medium.png"},
+                    {"token": "b", "url": f"{server}/medium.png"},
+                ],
+            )
+        self.assertEqual(finalized["ingest_status"], "ready")
+        self.assertEqual(len(finalized["asset_paths"]), 1)
+        codes = [warning["code"] for warning in finalized["warnings"]]
+        self.assertNotIn("attachment_total_over_30MiB", codes)
+        source_text = (self.vault / finalized["source_path"]).read_text(encoding="utf-8")
+        self.assertEqual(source_text.count(f"../../{finalized['asset_paths'][0]}"), 2)
+        staged_paths = git(self.vault, "diff", "--cached", "--name-only").stdout.splitlines()
+        self.assertEqual(staged_paths.count(finalized["asset_paths"][0]), 1)
+
+    def test_finalize_hard_20MiB_limit_still_fails_closed(self):
+        # AC-09: the 20 MiB single-image hard limit is unchanged; soft warnings
+        # never replace it.
+        staged = self.stage_web(annotations=[])
+        with image_server() as server:
+            with self.assertRaises(vault_capture.CaptureError):
+                self._finalize_markdown(
+                    staged,
+                    "# 超限文章\n\n![超限](vault-image://huge)",
+                    [{"token": "huge", "url": f"{server}/huge.png"}],
+                )
+        source = self.vault / staged["source_path"]
+        self.assertTrue(source.is_file())
+        self.assertEqual(vault_capture.get_field(source.read_text(encoding="utf-8"), "ingest_status"), "pending")
+        self.assertFalse((self.vault / "assets/images" / staged["id"]).exists())
 
     def test_ingest_web_default_residual_fake_ip_fails_preserves_source(self):
         # Default mode: a residual 198.19.0.0/16 system answer must fail closed and

@@ -21,12 +21,16 @@ knowledge-vault-blueprint/
 │   │   ├── SKILL.md
 │   │   ├── scripts/
 │   │   └── references/
-│   ├── vault-deep-reading/
+│   ├── vault-query/
 │   │   └── SKILL.md
 │   └── vault-maintenance/
 │       └── SKILL.md
+├── scripts/
+│   ├── sourcenotes_agent.py      # NotesVaulter 受控单入口（capture/query/maintenance）
+│   └── sourcenotes_ops.py        # 运维工具（audit/migrate/health/ledger/incident）
 └── tests/
-    └── skills/
+    ├── skills/
+    └── operations/
 ```
 
 规则：
@@ -68,7 +72,7 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
         id: "<vault-agent-id>",
         skills: [
           "vault-capture",
-          "vault-deep-reading",
+          "vault-query",
           "vault-maintenance"
         ]
       }
@@ -106,7 +110,17 @@ description: 简短说明它能做什么，以及用户在什么场景下应触�
 
 非空的 `agents.list[].skills` 是该 agent 的最终列表，不与默认列表自动合并。Allowlist 只控制 skill 可见性，不替代 sandbox、操作系统用户隔离、命令权限和文件权限。
 
-`vault-capture` 还要求目标 agent 能使用 `exec`、`sessions_spawn`，且 sandbox 对 `VAULT_ROOT` 具有写权限。网页正文抓取由仓库自有的 `ingest-web` 命令完成（Trafilatura + WeChat 适配 + Playwright 只读回退），不再依赖 agent 的 `web_fetch` 或 Browser 工具；`VAULT_ROOT` 的真实绝对路径只能保存在主机配置或 SecretRef 中，不得写入本仓库。
+### 4.0 单入口运行拓扑与受控 entrypoint
+
+正式运行采用「用户 → Steward（唯一入口）→ NotesVaulter（Capture / Query / Maintenance）」单入口拓扑（见 [D-023](../DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算) 与 [委派与操作规范](agent-operations.md)）。Steward 只负责规范委派、授权与简洁汇总，不直接写 Vault。NotesVaulter 的三类 skill 统一通过仓库受控入口 `scripts/sourcenotes_agent.py` 执行：
+
+- `capture preflight/stage/inspect/ingest/list-retryable`：只调用/导入 `vault_capture.py` 既有事务，不复制写入逻辑；网页 `ingest` 在当前 NotesVaulter 委派运行内确定性完成（单层委派），不再要求 spawn 网页 worker。
+- `query search/show/related`：严格只读，只读 Vault 内 Markdown，拒绝绝对路径/`..`/symlink 逃逸/非 Markdown；答案携带 note ID 与相对路径，输出有界。
+- `maintenance report`：严格只读，报告 Git 状态、failed/manual、缺失引用、附件预算与 2 GiB 闸门，不修复。
+
+entrypoint 只从宿主配置的 `VAULT_ROOT` 读取目标，不接受任意 vault/root、任意 shell 或任意 Python；后续可用 exec allowlist 限定 NotesVaulter 只运行该 entrypoint，而不是授予通用宿主命令和文件编辑能力。委派 envelope 与返回契约见 [agent-operations.md](agent-operations.md)。
+
+`vault-capture` 还要求目标 agent 能使用 `exec`，且 sandbox 对 `VAULT_ROOT` 具有写权限。网页正文抓取由仓库自有的 `ingest-web` 命令完成（Trafilatura + WeChat 适配 + Playwright 只读回退），不再依赖 agent 的 `web_fetch` 或 Browser 工具；`VAULT_ROOT` 的真实绝对路径只能保存在主机配置或 SecretRef 中，不得写入本仓库。`sessions_spawn` 不再作为 `vault-capture` 的网页完成前置条件（单层委派），但 agent 仍可能因其它运维任务需要该能力。
 
 `skills.entries.vault-capture.env` 只注入宿主 agent run。若该 agent 开启 Docker sandbox，`exec` 不继承宿主环境，必须同时：
 
@@ -139,6 +153,12 @@ VAULT_CAPTURE_SSRF_DOH_PROVIDER=cloudflare|google
 ### 4.3 微信抓取的 manual 边界
 
 `vault-capture` 抓取微信文章遇到验证、验证码、登录要求或限流时，一律**安全结束为 `manual`**，交由用户人工处理；当前规范**不使用** `VAULT_CAPTURE_BROWSER_PROFILE` 环境键，**不创建**专用 persistent profile，也**不以任何方式技术绕过**验证、登录或限流。本边界只约束 `vault-capture` 的微信自动抓取，不替代上文通用登录态浏览器的安全说明（该通用说明仅适用于确有用户显式登录态、属手动范畴的场景，不构成对微信自动抓取的 profile 授权）。
+
+### 4.4 附件预算、外部 incident/ledger 与日常 Git 冲突闸门
+
+- **附件预算**：网页抓取附件暂用普通 Git。同一 Source 事务内内容 SHA-256 相同的附件只落一份；单附件 >5 MiB、单 Source **物理落盘唯一附件字节** >30 MiB 只产生稳定 JSON warning（重复 token/正文位置不重复计入预算，不降低 `ready`、不丢附件）；20 MiB 单下载图片、100 MiB 单篇**下载字节**仍是安全硬限制；Vault 附件总量达到 2 GiB 是决策闸门，只由 health/maintenance 报告，达到后再评估 Git LFS/git-annex/对象存储（见 [D-023](../DECISIONS.md#d-023单入口运行拓扑steward-唯一入口--notesvaulter-三能力--附件预算)）。
+- **外部 incident/ledger**：incident bundle、operation ledger 与 health 状态文件必须位于正式 Vault 与蓝图库之外（目录 0700、文件 0600）；incident 保留完整诊断上下文但禁止 token/Cookie/password/private key，命中秘密扫描即失败关闭；ledger 不含正文。工具为 `scripts/sourcenotes_ops.py`（`incident`/`ledger`/`health`）。
+- **日常 Git 冲突闸门**：自动化写入前检查目标文件是否存在未暂存修改或未跟踪的既有文件；远端分叉或本地工作树冲突时停止自动处理，改为人工合并，不强制覆盖（见 [git-workflow.md](git-workflow.md)）。自动捕获只对本次变化路径 `git add`，不 commit/push。
 
 ## 5. 优先级与副本管理
 
